@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import signal
@@ -18,6 +19,7 @@ DEFAULT_LOCAL_PORT = 8000
 REMOTE_PORT = 8000
 STATUS_FILE = "/var/log/vllm.status"
 LOG_FILE = "/var/log/vllm.log"
+BOOTSTRAP_LOG = "/var/log/bootstrap.log"
 
 
 # ---------- config / state ----------
@@ -58,12 +60,26 @@ def clear_state() -> None:
         f.unlink()
 
 
-def pid_alive(pid: int) -> bool:
+def pid_alive(pid: int, image: str | None = None) -> bool:
+    """True if `pid` is a running process. On Windows, if `image` is given, the
+    process's image name must match it -- or be `cmd.exe`, since a .bat wrapper
+    (used by the test suite's fake ssh) runs as a cmd.exe child holding the pid
+    we recorded -- otherwise a reused pid for an unrelated process is rejected."""
     if sys.platform == "win32":
         out = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True,
         ).stdout
-        return str(pid) in out
+        for row in csv.reader(out.splitlines()):
+            if len(row) < 2:
+                continue
+            row_image, row_pid = row[0], row[1]
+            if row_pid != str(pid):
+                continue
+            if image is not None and row_image not in (image, "cmd.exe"):
+                return False
+            return True
+        return False
     try:
         os.kill(pid, 0)
         return True
@@ -115,6 +131,24 @@ def tunnel_cmd(cfg: dict, local_port: int) -> list[str]:
     return [ssh_bin(), *ssh_opts(cfg), "-N", "-L", f"{local_port}:127.0.0.1:{REMOTE_PORT}", ssh_dest(cfg)]
 
 
+def ssh_log_path() -> Path:
+    return home() / "ssh.log"
+
+
+def print_ssh_log_tail(n: int = 10) -> None:
+    """Print the last `n` lines of the tunnel ssh's stderr log, if any."""
+    path = ssh_log_path()
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    if not lines:
+        return
+    print(f"ssh.log tail ({path}):")
+    for line in lines[-n:]:
+        print(f"  {line}")
+
+
 def ssh_run(cfg: dict, remote_cmd: str, timeout: int = 20) -> str:
     try:
         r = subprocess.run(ssh_base(cfg) + [remote_cmd], capture_output=True, text=True, timeout=timeout)
@@ -159,7 +193,7 @@ def cmd_down(args) -> int:
     if not st:
         print("No tunnel recorded (nothing to do).")
         return 0
-    if pid_alive(st["pid"]):
+    if pid_alive(st["pid"], st.get("image")):
         kill_pid(st["pid"])
         print(f"Tunnel pid {st['pid']} stopped.")
     else:
@@ -169,19 +203,28 @@ def cmd_down(args) -> int:
     return 0
 
 
-def wait_ready(cfg: dict, local_port: int, timeout: float, interval: float, progress=print) -> tuple[bool, str]:
-    """Poll local /health; report remote status/log every `interval`; stop early on remote FAILED."""
+def wait_ready(cfg: dict, local_port: int, timeout: float, interval: float, progress=print,
+               proc: subprocess.Popen | None = None) -> tuple[bool, str]:
+    """Poll local /health; report remote status/log every `interval`; stop early on remote
+    FAILED or (if `proc` is given) if the tunnel ssh process has died."""
     health = f"http://127.0.0.1:{local_port}/health"
     deadline = time.monotonic() + timeout
     next_report = 0.0
     while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False, f"ssh exited with code {proc.returncode}"
         code, _ = http_get(health, timeout=2.0)
         if code == 200:
             return True, "READY"
         now = time.monotonic()
         if now >= next_report:
             next_report = now + interval
-            remote = ssh_run(cfg, f"cat {STATUS_FILE} 2>/dev/null; tail -n 3 {LOG_FILE} 2>/dev/null")
+            remote = ssh_run(
+                cfg,
+                f"cat {STATUS_FILE} 2>/dev/null; "
+                f"tail -n 3 {BOOTSTRAP_LOG} 2>/dev/null; "
+                f"tail -n 3 {LOG_FILE} 2>/dev/null",
+            )
             first = remote.splitlines()[0] if remote else ""
             progress(f"[instance] {remote or '(no output yet)'}")
             if first.startswith("FAILED"):
@@ -194,21 +237,32 @@ def cmd_tunnel(args) -> int:
     cfg = resolve_conn(args)
     local_port = int(cfg["local_port"])
     old = load_state()
-    if old and pid_alive(old["pid"]):
+    if old and pid_alive(old["pid"], old.get("image")):
         print(f"Tunnel already running (pid {old['pid']}); run `down` first.")
         return 1
     cmd = tunnel_cmd(cfg, local_port)
     creation = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creation)
+    ssh_log = ssh_log_path()
+    ssh_log_f = ssh_log.open("w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=ssh_log_f, creationflags=creation)
+    finally:
+        # The child has its own duplicated fd; our handle isn't needed once spawned.
+        ssh_log_f.close()
     time.sleep(1.0)
     if proc.poll() is not None:
-        print(f"ssh exited immediately with code {proc.returncode}; check host/port/key.")
+        print(f"ssh exited with code {proc.returncode} immediately; check host/port/key.")
+        print_ssh_log_tail()
         return 1
-    save_state({"pid": proc.pid, "host": cfg["host"], "ssh_port": int(cfg["ssh_port"]), "local_port": local_port})
+    image = Path(ssh_bin()).name
+    save_state({"pid": proc.pid, "host": cfg["host"], "ssh_port": int(cfg["ssh_port"]), "local_port": local_port,
+                "image": image})
     print(f"Tunnel pid {proc.pid}: 127.0.0.1:{local_port} -> {cfg['host']}:{REMOTE_PORT}. Waiting for vLLM...")
-    ok, why = wait_ready(cfg, local_port, timeout=args.timeout, interval=args.interval)
+    ok, why = wait_ready(cfg, local_port, timeout=args.timeout, interval=args.interval, proc=proc)
     if not ok:
         print(f"Not ready: {why}")
+        if why.startswith("ssh exited"):
+            print_ssh_log_tail()
         kill_pid(proc.pid)
         try:
             proc.wait(timeout=5)
@@ -235,7 +289,7 @@ def state_cfg(st: dict) -> dict:
 
 def cmd_status(args) -> int:
     st = load_state()
-    if not st or not pid_alive(st["pid"]):
+    if not st or not pid_alive(st["pid"], st.get("image")):
         print("tunnel: down")
         return 1
     print(f"tunnel: up (pid {st['pid']}) 127.0.0.1:{st['local_port']} -> {st['host']}:{REMOTE_PORT}")

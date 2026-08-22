@@ -15,6 +15,7 @@ def setup(tmp_path: Path, fakes: Path, *, version="0.27.1", detect_out="5090 1",
         "VLLM_LOG_FILE": str(tmp_path / "vllm.log"),
         "VLLM_VERSION_CMD": str(fakes / "version"),
         "DETECT_GPU": str(fakes / "detect"),
+        "DETECT_ERR_FILE": str(tmp_path / "detect.err"),
         "SERVE": str(fakes / "serve"),
         "PROFILE": "",
         "HF_TOKEN": "",
@@ -38,9 +39,14 @@ def test_old_vllm_exits_4(tmp_path, fakes):
 
 def test_unknown_gpu_exits_2(tmp_path, fakes):
     env, status = setup(tmp_path, fakes, detect_out="", detect_rc=2)
+    write_fake(
+        fakes, "detect",
+        "echo 'detect_gpu: unknown GPU: NVIDIA GeForce RTX 4090, 24564 MiB' >&2\nexit 2\n",
+    )
     r = run_bash(BOOT, env=env, cwd=tmp_path)
     assert r.returncode == 2
     assert status.read_text().startswith("FAILED: unknown gpu")
+    assert "RTX 4090" in status.read_text()
 
 
 def test_profile_env_override_skips_detection(tmp_path, fakes):
@@ -91,5 +97,21 @@ def test_dotenv_malformed_line_is_ignored(tmp_path, fakes):
         assert r.returncode == 0, r.stderr
         assert "SERVE a100-80" in r.stdout
         assert "malformed" in r.stderr
+    finally:
+        dotenv.unlink()
+
+
+def test_dotenv_strips_quotes_comments_and_last_line(tmp_path, fakes):
+    env, status = setup(tmp_path, fakes, detect_out="", detect_rc=2)
+    dotenv = ROOT / ".env"
+    assert not dotenv.exists(), "refusing to clobber a real .env"
+    # No trailing newline on the last line, an inline comment on the first,
+    # and both quote styles -- all must be handled.
+    dotenv.write_bytes(b'PROFILE="a100-80"  # pick\nHF_TOKEN=\'x\'')
+    try:
+        del env["PROFILE"]
+        r = run_bash(BOOT, env=env, cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "SERVE a100-80" in r.stdout
     finally:
         dotenv.unlink()

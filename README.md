@@ -50,7 +50,18 @@ coder_model = "qwen"
 | `scripts/smoke.sh` | one thinking-mode completion; prints tok/s |
 
 Status file values: `STARTING`, `READY`, `FAILED: <reason>`.
-Bootstrap exit codes: 2 unknown GPU, 3 `HF_TOKEN` required, 4 vLLM < 0.17.
+Bootstrap exit codes: 2 unknown GPU, 3 `HF_TOKEN` required, 4 vLLM < 0.17 or
+not importable, 5 `curl` missing.
+
+## Troubleshooting
+
+- **`REMOTE HOST IDENTIFICATION HAS CHANGED`**: Vast reuses hostnames like
+  `ssh5.vast.ai:PORT` across different rented instances, so a new rental can
+  present a different host key on the same host:port pair OpenSSH already has
+  cached. `gpu_llm.py tunnel` writes the tunnel ssh's stderr to
+  `~/.gpu-llm/ssh.log` — check there for this message, then fix it with
+  `ssh-keygen -R "[host]:port"` (matching the `host`/`ssh_port` from
+  `config.toml`) and re-run `tunnel`.
 
 ## Tests (no GPU needed)
 

@@ -9,6 +9,11 @@ from tests.conftest import ROOT, run_bash
 SMOKE = ROOT / "scripts" / "smoke.sh"
 
 
+def _stop(srv):
+    srv.shutdown()
+    srv.server_close()
+
+
 def serve_json(payload: dict):
     class H(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -42,7 +47,7 @@ def test_smoke_passes_and_prints_toks():
     try:
         r = run_bash(SMOKE, env={"BASE_URL": base})
     finally:
-        srv.shutdown()
+        _stop(srv)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "tok/s:" in r.stdout
     assert "reasoning: ok" in r.stdout
@@ -53,7 +58,7 @@ def test_smoke_fails_without_reasoning():
     try:
         r = run_bash(SMOKE, env={"BASE_URL": base})
     finally:
-        srv.shutdown()
+        _stop(srv)
     assert r.returncode == 1
     assert "reasoning_content empty" in r.stdout + r.stderr
 
@@ -63,6 +68,6 @@ def test_smoke_handles_zero_elapsed():
     try:
         r = run_bash(SMOKE, env={"BASE_URL": base, "SMOKE_START": "5", "SMOKE_END": "5"})
     finally:
-        srv.shutdown()
+        _stop(srv)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "tok/s: n/a" in r.stdout

@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -101,9 +102,10 @@ def _stop(srv):
     srv.server_close()
 
 
-def _fake_ssh(tmp_path, status_text: str, exit_code: int = 0):
-    """Fake ssh: `-N` -> sleep; otherwise echo a canned status + log tail
-    (or, if `exit_code` is non-zero, write `status_text` to stderr and exit
+def _fake_ssh(tmp_path, status_text: str, exit_code: int = 0, tunnel_exit: int | None = None):
+    """Fake ssh: `-N` -> sleep (or, if `tunnel_exit` is set, sleep ~0.5s then exit with
+    that code, simulating the tunnel dying mid-wait); otherwise echo a canned status +
+    log tail (or, if `exit_code` is non-zero, write `status_text` to stderr and exit
     with that code, simulating a failed remote command).
 
     The status line is printed first (so callers that only look at the first
@@ -126,6 +128,10 @@ def _fake_ssh(tmp_path, status_text: str, exit_code: int = 0):
             "    print('ARGV:', ' '.join(argv))\n"
             "    print('log line 1'); print('log line 2')\n"
         )
+    if tunnel_exit is not None:
+        n_body = f"    time.sleep(0.5)\n    sys.exit({tunnel_exit!r})\n"
+    else:
+        n_body = "    time.sleep(120)\n"
     script = tmp_path / "fake_ssh.py"
     script.write_text(
         "import sys, time\n"
@@ -135,8 +141,8 @@ def _fake_ssh(tmp_path, status_text: str, exit_code: int = 0):
         "    sys.stderr.write('fake_ssh: -N appears after destination arg\\n')\n"
         "    sys.exit(2)\n"
         "if '-N' in argv:\n"
-        "    time.sleep(120)\n"
-        "else:\n"
+        + n_body
+        + "else:\n"
         + non_n_body
     )
     if sys.platform == "win32":
@@ -213,6 +219,23 @@ def test_cmd_tunnel_failure_kills_ssh_and_returns_1(home, monkeypatch, capsys):
     assert rc == 1
     assert gpu_llm.load_state() is None
     assert "FAILED: vllm 0.16 < 0.17" in capsys.readouterr().out
+
+
+def test_cmd_tunnel_ssh_dying_mid_wait_returns_1_fast(home, monkeypatch, capsys):
+    srv = _health_server(ok_after=10_000)  # never becomes healthy on its own
+    monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "STARTING", tunnel_exit=7))
+    start = time.monotonic()
+    try:
+        rc = gpu_llm.main(["tunnel", "--host", "h", "--port", "22",
+                           "--local", str(srv.server_port), "--timeout", "20", "--interval", "0.2"])
+    finally:
+        _stop(srv)
+    elapsed = time.monotonic() - start
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert elapsed < 10, f"took {elapsed}s, expected well under the 20s timeout"
+    assert "ssh exited with code 7" in out
+    assert gpu_llm.load_state() is None
 
 
 def test_tunnel_command_puts_options_before_destination():
