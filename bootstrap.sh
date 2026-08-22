@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Vast onstart entrypoint: env -> vLLM version check -> GPU detect -> token check -> serve.
+set -euo pipefail
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/status.sh
+source "$REPO_ROOT/lib/status.sh"
+
+MIN_VLLM="0.17"
+VLLM_VERSION_CMD="${VLLM_VERSION_CMD:-python3 -c 'import vllm; print(vllm.__version__)'}"
+DETECT_GPU="${DETECT_GPU:-$REPO_ROOT/lib/detect_gpu.sh}"
+SERVE="${SERVE:-$REPO_ROOT/scripts/serve.sh}"
+
+# 1. .env (only sets vars that are unset or empty in the environment)
+if [[ -f "$REPO_ROOT/.env" ]]; then
+  while IFS='=' read -r k v; do
+    k="${k%$'\r'}"; v="${v%$'\r'}"
+    [[ -z "$k" || "$k" == \#* ]] && continue
+    if [[ -z "${!k:-}" ]]; then export "$k=$v"; fi
+  done < "$REPO_ROOT/.env"
+fi
+export HF_TOKEN="${HF_TOKEN:-}" PROFILE="${PROFILE:-}" MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
+
+# 2. vLLM version
+ver="$(bash -c "$VLLM_VERSION_CMD" 2>/dev/null || true)"
+if [[ -z "$ver" ]]; then
+  write_status "FAILED: vllm not importable"; exit 4
+fi
+if [[ "$(printf '%s\n%s\n' "$MIN_VLLM" "$ver" | sort -V | head -n1)" != "$MIN_VLLM" ]]; then
+  write_status "FAILED: vllm $ver < $MIN_VLLM"; exit 4
+fi
+echo "[bootstrap] vllm $ver"
+
+# 3. profile
+if [[ -z "$PROFILE" ]]; then
+  if ! out="$(bash "$DETECT_GPU")"; then
+    write_status "FAILED: unknown gpu (see bootstrap log)"; exit 2
+  fi
+  PROFILE="${out%% *}"
+  echo "[bootstrap] detected profile=$PROFILE gpus=${out#* }"
+else
+  echo "[bootstrap] PROFILE override=$PROFILE"
+fi
+
+# 4. token
+profile_file="$REPO_ROOT/profiles/${PROFILE}.yaml"
+if [[ ! -f "$profile_file" ]]; then
+  write_status "FAILED: no profile '$PROFILE'"; exit 2
+fi
+if grep -qE '^requires_hf_token:\s*true' "$profile_file" && [[ -z "$HF_TOKEN" ]]; then
+  write_status "FAILED: HF_TOKEN required by profile $PROFILE"; exit 3
+fi
+[[ -n "$HF_TOKEN" ]] && export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
+
+# 5. serve
+exec bash "$SERVE" "$PROFILE"
