@@ -96,12 +96,27 @@ def _health_server(ok_after: int):
     return srv
 
 
+def _stop(srv):
+    srv.shutdown()
+    srv.server_close()
+
+
 def _fake_ssh(tmp_path, status_text: str):
-    """Fake ssh: `-N` -> sleep; otherwise echo a canned status + log tail."""
+    """Fake ssh: `-N` -> sleep; otherwise echo a canned status + log tail.
+
+    Exits 2 if `-N` appears after the destination (`root@...`) argument,
+    which is what OpenSSH sees as "run this as a remote command" instead of
+    "open a tunnel" -- catches a regression in ssh argument ordering.
+    """
     script = tmp_path / "fake_ssh.py"
     script.write_text(
         "import sys, time\n"
-        "if '-N' in sys.argv:\n"
+        "argv = sys.argv[1:]\n"
+        "dest_idx = next((i for i, a in enumerate(argv) if '@' in a), None)\n"
+        "if '-N' in argv and dest_idx is not None and argv.index('-N') > dest_idx:\n"
+        "    sys.stderr.write('fake_ssh: -N appears after destination arg\\n')\n"
+        "    sys.exit(2)\n"
+        "if '-N' in argv:\n"
         "    time.sleep(120)\n"
         "else:\n"
         f"    print({status_text!r}); print('log line 1'); print('log line 2')\n"
@@ -124,7 +139,7 @@ def test_wait_ready_returns_true_when_health_ok(home, monkeypatch):
     try:
         ok, why = gpu_llm.wait_ready(cfg, srv.server_port, timeout=20, interval=0.2, progress=msgs.append)
     finally:
-        srv.shutdown()
+        _stop(srv)
     assert ok and why == "READY"
     assert any("STARTING" in m for m in msgs)
 
@@ -136,7 +151,7 @@ def test_wait_ready_stops_early_on_remote_failed(home, monkeypatch):
         ok, why = gpu_llm.wait_ready({"host": "h", "ssh_port": 22}, srv.server_port,
                                      timeout=20, interval=0.2, progress=lambda m: None)
     finally:
-        srv.shutdown()
+        _stop(srv)
     assert not ok and why.startswith("FAILED: vllm exited 1")
 
 
@@ -147,7 +162,7 @@ def test_wait_ready_times_out(home, monkeypatch):
         ok, why = gpu_llm.wait_ready({"host": "h", "ssh_port": 22}, srv.server_port,
                                      timeout=1, interval=0.2, progress=lambda m: None)
     finally:
-        srv.shutdown()
+        _stop(srv)
     assert (ok, why) == (False, "timeout")
 
 
@@ -158,7 +173,7 @@ def test_cmd_tunnel_spawns_ssh_saves_state_and_prints_env(home, monkeypatch, cap
         rc = gpu_llm.main(["tunnel", "--host", "1.2.3.4", "--port", "2222",
                            "--local", str(srv.server_port), "--timeout", "20", "--interval", "0.2"])
     finally:
-        srv.shutdown()
+        _stop(srv)
     out = capsys.readouterr().out
     assert rc == 0, out
     st = gpu_llm.load_state()
@@ -176,7 +191,17 @@ def test_cmd_tunnel_failure_kills_ssh_and_returns_1(home, monkeypatch, capsys):
         rc = gpu_llm.main(["tunnel", "--host", "h", "--port", "22",
                            "--local", str(srv.server_port), "--timeout", "20", "--interval", "0.2"])
     finally:
-        srv.shutdown()
+        _stop(srv)
     assert rc == 1
     assert gpu_llm.load_state() is None
     assert "FAILED: vllm 0.16 < 0.17" in capsys.readouterr().out
+
+
+def test_tunnel_command_puts_options_before_destination():
+    cfg = {"host": "h", "ssh_port": 22, "ssh_key": "k"}
+    cmd = gpu_llm.tunnel_cmd(cfg, 8000)
+    assert cmd[-1] == "root@h"
+    dest_idx = len(cmd) - 1
+    for flag in ("-N", "-L", "-p", "-i"):
+        assert flag in cmd
+        assert cmd.index(flag) < dest_idx

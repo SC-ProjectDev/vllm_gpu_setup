@@ -83,17 +83,36 @@ def kill_pid(pid: int) -> None:
 
 # ---------- ssh helpers ----------
 
+# Popen handles for tunnels we intentionally leave running past cmd_tunnel's
+# return (the OS process persists until `down` kills it by pid); kept here so
+# Python doesn't finalize the handle mid-process and warn "still running".
+_spawned: list[subprocess.Popen] = []
+
+
 def ssh_bin() -> str:
     return os.environ.get("GPU_LLM_SSH", "ssh")
 
 
-def ssh_base(cfg: dict) -> list[str]:
-    cmd = [ssh_bin(), "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes",
-           "-p", str(cfg["ssh_port"])]
+def ssh_opts(cfg: dict) -> list[str]:
+    opts = ["-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes",
+            "-p", str(cfg["ssh_port"])]
     if cfg.get("ssh_key"):
-        cmd += ["-i", cfg["ssh_key"]]
-    cmd.append(f"root@{cfg['host']}")
-    return cmd
+        opts += ["-i", cfg["ssh_key"]]
+    return opts
+
+
+def ssh_dest(cfg: dict) -> str:
+    return f"root@{cfg['host']}"
+
+
+def ssh_base(cfg: dict) -> list[str]:
+    return [ssh_bin(), *ssh_opts(cfg), ssh_dest(cfg)]
+
+
+def tunnel_cmd(cfg: dict, local_port: int) -> list[str]:
+    """ssh -N -L command with options before the destination, so OpenSSH parses
+    -N/-L as flags instead of a remote command."""
+    return [ssh_bin(), *ssh_opts(cfg), "-N", "-L", f"{local_port}:127.0.0.1:{REMOTE_PORT}", ssh_dest(cfg)]
 
 
 def ssh_run(cfg: dict, remote_cmd: str, timeout: int = 20) -> str:
@@ -176,7 +195,7 @@ def cmd_tunnel(args) -> int:
     if old and pid_alive(old["pid"]):
         print(f"Tunnel already running (pid {old['pid']}); run `down` first.")
         return 1
-    cmd = ssh_base(cfg) + ["-N", "-L", f"{local_port}:127.0.0.1:{REMOTE_PORT}"]
+    cmd = tunnel_cmd(cfg, local_port)
     creation = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creation)
     time.sleep(1.0)
@@ -195,6 +214,7 @@ def cmd_tunnel(args) -> int:
             pass
         clear_state()
         return 1
+    _spawned.append(proc)
     print("vLLM is READY.\n")
     print(f"LLM_BASE_URL=http://127.0.0.1:{local_port}")
     print("LLM_MODEL=qwen")
