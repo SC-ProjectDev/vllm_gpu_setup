@@ -20,7 +20,7 @@
 ## On-start script
 
 ```
-cd /root && git clone https://github.com/<you>/vllm_gpu_setup.git && cd vllm_gpu_setup && cp -n .env.example .env && nohup bash bootstrap.sh > /var/log/bootstrap.log 2>&1 &
+cd /root && git clone https://github.com/SC-ProjectDev/vllm_gpu_setup.git && cd vllm_gpu_setup && cp -n .env.example .env && nohup bash bootstrap.sh > /var/log/bootstrap.log 2>&1 &
 ```
 
 Replace `<you>` with the GitHub owner after pushing this repo. For a private
