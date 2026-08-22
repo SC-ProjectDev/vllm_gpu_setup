@@ -22,6 +22,16 @@ mkdir -p "$(dirname "$VLLM_LOG_FILE")"
 write_status "STARTING"
 echo "[serve] profile=$profile_id" | tee -a "$VLLM_LOG_FILE"
 
+report_failure() {
+  local code="$1"
+  write_status "FAILED: vllm exited $code"
+  echo "[serve] last 40 log lines:"
+  tail -n 40 "$VLLM_LOG_FILE"
+  if grep -qi "out of memory" "$VLLM_LOG_FILE"; then
+    echo "[serve] hint: OOM at startup — set MAX_MODEL_LEN to a lower value in .env and re-run."
+  fi
+}
+
 "$VLLM_BIN" serve "${argv[@]}" --host 127.0.0.1 --port 8000 >> "$VLLM_LOG_FILE" 2>&1 &
 vllm_pid=$!
 
@@ -29,10 +39,10 @@ vllm_pid=$!
 while kill -0 "$vllm_pid" 2>/dev/null; do
   if "$CURL_BIN" -fsS -m 3 "$HEALTH_URL" >/dev/null 2>&1; then
     write_status "READY"
-    wait "$vllm_pid"; code=$?
+    wait "$vllm_pid" || code=$?
+    code="${code:-0}"
     if [[ $code -ne 0 ]]; then
-      write_status "FAILED: vllm exited $code"
-      tail -n 40 "$VLLM_LOG_FILE"
+      report_failure "$code"
       exit "$code"
     fi
     exit 0
@@ -42,10 +52,5 @@ done
 
 wait "$vllm_pid" || code=$?
 code="${code:-0}"
-write_status "FAILED: vllm exited $code"
-echo "[serve] last 40 log lines:"
-tail -n 40 "$VLLM_LOG_FILE"
-if grep -qi "out of memory" "$VLLM_LOG_FILE"; then
-  echo "[serve] hint: OOM at startup — set MAX_MODEL_LEN to a lower value in .env and re-run."
-fi
+report_failure "$code"
 exit "$code"

@@ -45,6 +45,17 @@ def test_serve_failure_writes_failed_with_oom_hint(tmp_path, fakes):
     assert "out of memory" in r.stdout  # log tail printed
 
 
+def test_serve_failure_after_ready_writes_failed(tmp_path, fakes):
+    write_fake(fakes, "vllm", 'sleep 1; echo "CUDA out of memory" >&2; exit 3\n')
+    write_fake(fakes, "curl", "exit 0\n")  # always healthy
+    env, status, log = env_for(tmp_path, fakes)
+    r = run_bash(SERVE, "5090", env=env)
+    assert r.returncode == 3
+    assert status.read_text().strip() == "FAILED: vllm exited 3"
+    assert "out of memory" in r.stdout
+    assert "MAX_MODEL_LEN" in r.stdout
+
+
 def test_serve_max_model_len_override_reaches_vllm(tmp_path, fakes):
     write_fake(fakes, "vllm", 'echo "ARGS: $*"; sleep 1\n')
     write_fake(fakes, "curl", "exit 0\n")
