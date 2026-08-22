@@ -11,9 +11,9 @@ payload=$(cat <<JSON
 JSON
 )
 
-start=$(date +%s.%N)
+start="${SMOKE_START:-$(date +%s.%N)}"
 resp="$(curl -fsS -m 600 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d "$payload")"
-end=$(date +%s.%N)
+end="${SMOKE_END:-$(date +%s.%N)}"
 
 RESP="$resp" START="$start" END="$end" python3 - <<'PY'
 import json, os, sys
@@ -29,5 +29,8 @@ print("reasoning: ok")
 print("content:", content.strip()[:80])
 toks = r.get("usage", {}).get("completion_tokens", 0)
 secs = float(os.environ["END"]) - float(os.environ["START"])
-print(f"tok/s: {toks / secs:.1f}  ({toks} tokens in {secs:.1f}s)")
+if secs > 0:
+    print(f"tok/s: {toks / secs:.1f}  ({toks} tokens in {secs:.1f}s)")
+else:
+    print(f"tok/s: n/a  ({toks} tokens, elapsed time below clock resolution)")
 PY
