@@ -1,4 +1,3 @@
-import json
 import os
 import subprocess
 import sys
@@ -43,12 +42,19 @@ def test_pid_alive_for_self_and_dead():
 
 def test_down_kills_tunnel_and_reminds(home, capsys):
     p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    gpu_llm.save_state({"pid": p.pid, "host": "h", "ssh_port": 22, "local_port": 8000})
-    rc = gpu_llm.main(["down"])
-    p.wait(timeout=10)
-    assert rc == 0
-    assert gpu_llm.load_state() is None
-    assert "still billing" in capsys.readouterr().out
+    try:
+        gpu_llm.save_state({"pid": p.pid, "host": "h", "ssh_port": 22, "local_port": 8000})
+        rc = gpu_llm.main(["down"])
+        p.wait(timeout=10)
+        assert rc == 0
+        assert gpu_llm.load_state() is None
+        assert "still billing" in capsys.readouterr().out
+    finally:
+        try:
+            p.kill()
+        except OSError:
+            pass
+        p.wait(timeout=10)
 
 
 def test_down_with_dead_pid_is_clean(home, capsys):
