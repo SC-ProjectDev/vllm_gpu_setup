@@ -1,7 +1,7 @@
 # vLLM GPU Setup — Milestone 1 Design
 
 **Date:** 2026-08-22
-**Status:** Approved design, pending implementation plan
+**Status:** Implemented (M1 code complete; acceptance run pending)
 **Supersedes:** `pre_planning.md` (kept for history; its "Qwen3.5" correction is stale)
 
 ## 1. Goal
