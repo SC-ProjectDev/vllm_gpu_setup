@@ -111,6 +111,7 @@ def http_get(url: str, timeout: float = 3.0) -> tuple[int, str]:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
+        e.close()
         return e.code, ""
     except (urllib.error.URLError, OSError, ValueError):
         return 0, ""
@@ -147,9 +148,57 @@ def cmd_down(args) -> int:
     return 0
 
 
-def cmd_tunnel(args) -> int:  # implemented in Task 7
-    print("tunnel: not implemented", file=sys.stderr)
-    return 2
+def wait_ready(cfg: dict, local_port: int, timeout: float, interval: float, progress=print) -> tuple[bool, str]:
+    """Poll local /health; report remote status/log every `interval`; stop early on remote FAILED."""
+    health = f"http://127.0.0.1:{local_port}/health"
+    deadline = time.monotonic() + timeout
+    next_report = 0.0
+    while time.monotonic() < deadline:
+        code, _ = http_get(health, timeout=2.0)
+        if code == 200:
+            return True, "READY"
+        now = time.monotonic()
+        if now >= next_report:
+            next_report = now + interval
+            remote = ssh_run(cfg, f"cat {STATUS_FILE} 2>/dev/null; tail -n 3 {LOG_FILE} 2>/dev/null")
+            first = remote.splitlines()[0] if remote else ""
+            progress(f"[instance] {remote or '(no output yet)'}")
+            if first.startswith("FAILED"):
+                return False, first
+        time.sleep(min(1.0, interval))
+    return False, "timeout"
+
+
+def cmd_tunnel(args) -> int:
+    cfg = resolve_conn(args)
+    local_port = int(cfg["local_port"])
+    old = load_state()
+    if old and pid_alive(old["pid"]):
+        print(f"Tunnel already running (pid {old['pid']}); run `down` first.")
+        return 1
+    cmd = ssh_base(cfg) + ["-N", "-L", f"{local_port}:127.0.0.1:{REMOTE_PORT}"]
+    creation = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creation)
+    time.sleep(1.0)
+    if proc.poll() is not None:
+        print(f"ssh exited immediately with code {proc.returncode}; check host/port/key.")
+        return 1
+    save_state({"pid": proc.pid, "host": cfg["host"], "ssh_port": int(cfg["ssh_port"]), "local_port": local_port})
+    print(f"Tunnel pid {proc.pid}: 127.0.0.1:{local_port} -> {cfg['host']}:{REMOTE_PORT}. Waiting for vLLM...")
+    ok, why = wait_ready(cfg, local_port, timeout=args.timeout, interval=args.interval)
+    if not ok:
+        print(f"Not ready: {why}")
+        kill_pid(proc.pid)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        clear_state()
+        return 1
+    print("vLLM is READY.\n")
+    print(f"LLM_BASE_URL=http://127.0.0.1:{local_port}")
+    print("LLM_MODEL=qwen")
+    return 0
 
 
 def cmd_status(args) -> int:  # implemented in Task 8
