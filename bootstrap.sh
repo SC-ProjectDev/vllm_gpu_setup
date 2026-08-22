@@ -15,6 +15,9 @@ if [[ -f "$REPO_ROOT/.env" ]]; then
   while IFS='=' read -r k v; do
     k="${k%$'\r'}"; v="${v%$'\r'}"
     [[ -z "$k" || "$k" == \#* ]] && continue
+    if [[ ! "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "[bootstrap] ignoring malformed .env line: $k" >&2; continue
+    fi
     if [[ -z "${!k:-}" ]]; then export "$k=$v"; fi
   done < "$REPO_ROOT/.env"
 fi

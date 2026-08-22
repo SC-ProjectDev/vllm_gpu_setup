@@ -78,3 +78,18 @@ def test_dotenv_is_loaded_from_repo_root(tmp_path, fakes):
         assert "SERVE a100-80" in r.stdout
     finally:
         dotenv.unlink()
+
+
+def test_dotenv_malformed_line_is_ignored(tmp_path, fakes):
+    env, status = setup(tmp_path, fakes, detect_out="", detect_rc=2)
+    dotenv = ROOT / ".env"
+    assert not dotenv.exists(), "refusing to clobber a real .env"
+    dotenv.write_text("BAD KEY = x\nPROFILE=a100-80\n")
+    try:
+        del env["PROFILE"]
+        r = run_bash(BOOT, env=env, cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "SERVE a100-80" in r.stdout
+        assert "malformed" in r.stderr
+    finally:
+        dotenv.unlink()
