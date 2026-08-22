@@ -1,13 +1,13 @@
 import pytest
 
-from tests.conftest import ROOT, run_bash, write_fake, _to_bash_path
+from tests.conftest import ROOT, run_bash, write_fake
 
 SCRIPT = ROOT / "lib" / "detect_gpu.sh"
 
 
 def detect(fakes, smi_output: str):
     fake = write_fake(fakes, "fake_smi", f"printf '%b\\n' {smi_output!r}\n")
-    return run_bash(SCRIPT, env={"NVIDIA_SMI": _to_bash_path(fake)})
+    return run_bash(SCRIPT, env={"NVIDIA_SMI": str(fake)})
 
 
 @pytest.mark.parametrize("line,expected", [

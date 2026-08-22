@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -31,14 +32,13 @@ def run_bash(script: Path, *args: str, env: dict | None = None, cwd: Path | None
     """Run a repo bash script through `bash`, returning CompletedProcess with text output."""
     full_env = dict(os.environ)
     if env:
-        # Convert any environment variables with Windows paths to bash paths
-        for key, value in list(env.items()):
-            try:
-                p = Path(value)
-                env[key] = _to_bash_path(p)
-            except (ValueError, TypeError):
-                pass
-        full_env.update(env)
+        # Work on a copy to avoid mutating caller's dict
+        env_copy = dict(env)
+        # Convert only Windows absolute paths (e.g., C:\... or D:/) to bash paths
+        for key, value in env_copy.items():
+            if isinstance(value, str) and re.match(r"^[A-Za-z]:[/\\]", value):
+                env_copy[key] = _to_bash_path(Path(value))
+        full_env.update(env_copy)
     return subprocess.run(
         [BASH, _to_bash_path(script), *args],
         capture_output=True, text=True, env=full_env, cwd=cwd or ROOT,
