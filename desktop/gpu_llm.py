@@ -221,14 +221,44 @@ def cmd_tunnel(args) -> int:
     return 0
 
 
-def cmd_status(args) -> int:  # implemented in Task 8
-    print("status: not implemented", file=sys.stderr)
-    return 2
+def state_cfg(st: dict) -> dict:
+    """Build an ssh cfg (host/ssh_port/ssh_key) from saved tunnel state, pulling
+    ssh_key from config.toml if one is set there."""
+    cfg = {"host": st["host"], "ssh_port": st["ssh_port"]}
+    ssh_key = load_config().get("ssh_key")
+    if ssh_key:
+        cfg["ssh_key"] = ssh_key
+    return cfg
 
 
-def cmd_logs(args) -> int:  # implemented in Task 8
-    print("logs: not implemented", file=sys.stderr)
-    return 2
+def cmd_status(args) -> int:
+    st = load_state()
+    if not st or not pid_alive(st["pid"]):
+        print("tunnel: down")
+        return 1
+    print(f"tunnel: up (pid {st['pid']}) 127.0.0.1:{st['local_port']} -> {st['host']}:{REMOTE_PORT}")
+    code, body = http_get(f"http://127.0.0.1:{st['local_port']}/v1/models", timeout=3.0)
+    if code == 200:
+        try:
+            ids = [m["id"] for m in json.loads(body).get("data", [])]
+        except (ValueError, KeyError, TypeError):
+            ids = []
+        print(f"models: {', '.join(ids) or '(none)'}")
+    else:
+        print("models: unreachable")
+    gpu = ssh_run(state_cfg(st), "nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader")
+    print(f"gpu: {gpu}")
+    return 0
+
+
+def cmd_logs(args) -> int:
+    cfg = resolve_conn(args)
+    tail = ["tail", "-f" if args.follow else "", "-n", "100", LOG_FILE]
+    remote = " ".join(x for x in tail if x)
+    try:
+        return subprocess.call(ssh_base(cfg) + [remote])
+    except KeyboardInterrupt:
+        return 0
 
 
 def build_parser() -> argparse.ArgumentParser:

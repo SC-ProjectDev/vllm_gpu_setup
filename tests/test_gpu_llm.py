@@ -205,3 +205,37 @@ def test_tunnel_command_puts_options_before_destination():
     for flag in ("-N", "-L", "-p", "-i"):
         assert flag in cmd
         assert cmd.index(flag) < dest_idx
+
+
+def test_status_reports_tunnel_models_and_gpu(home, monkeypatch, capsys):
+    srv = _health_server(ok_after=0)
+    monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "NVIDIA GeForce RTX 5090, 31000 MiB, 24000 MiB"))
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        gpu_llm.save_state({"pid": p.pid, "host": "h", "ssh_port": 22, "local_port": srv.server_port})
+        rc = gpu_llm.main(["status"])
+    finally:
+        _stop(srv)
+        try:
+            p.kill()
+        except OSError:
+            pass
+        p.wait(timeout=10)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"tunnel: up (pid {p.pid})" in out
+    assert "models: qwen" in out
+    assert "gpu: NVIDIA GeForce RTX 5090" in out
+
+
+def test_status_when_down(home, capsys):
+    rc = gpu_llm.main(["status"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "tunnel: down" in out
+
+
+def test_logs_invokes_ssh_tail(home, monkeypatch, capsys):
+    monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "LOGLINE"))
+    rc = gpu_llm.main(["logs", "--host", "h", "--port", "22"])
+    assert rc == 0
