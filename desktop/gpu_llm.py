@@ -64,7 +64,9 @@ def pid_alive(pid: int, image: str | None = None) -> bool:
     """True if `pid` is a running process. On Windows, if `image` is given, the
     process's image name must match it -- or be `cmd.exe`, since a .bat wrapper
     (used by the test suite's fake ssh) runs as a cmd.exe child holding the pid
-    we recorded -- otherwise a reused pid for an unrelated process is rejected."""
+    we recorded -- otherwise a reused pid for an unrelated process is rejected.
+    The match is on the stem, case-insensitively, so "ssh" (the CLI default),
+    "ssh.exe" (what tasklist actually reports), and "SSH.EXE" all agree."""
     if sys.platform == "win32":
         out = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
@@ -76,8 +78,10 @@ def pid_alive(pid: int, image: str | None = None) -> bool:
             row_image, row_pid = row[0], row[1]
             if row_pid != str(pid):
                 continue
-            if image is not None and row_image not in (image, "cmd.exe"):
-                return False
+            if image is not None:
+                row_stem = Path(row_image).stem.casefold()
+                if row_stem not in (Path(image).stem.casefold(), "cmd"):
+                    return False
             return True
         return False
     try:

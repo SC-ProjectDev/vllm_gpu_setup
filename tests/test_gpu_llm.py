@@ -41,6 +41,19 @@ def test_pid_alive_for_self_and_dead():
     assert not gpu_llm.pid_alive(p.pid)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="tasklist image matching is Windows-only")
+def test_pid_alive_image_match_is_stem_and_case_insensitive():
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert gpu_llm.pid_alive(p.pid, "python")
+        assert gpu_llm.pid_alive(p.pid, "python.exe")
+        assert gpu_llm.pid_alive(p.pid, "PYTHON.EXE")
+        assert not gpu_llm.pid_alive(p.pid, "notepad")
+    finally:
+        p.kill()
+        p.wait(timeout=10)
+
+
 def test_down_kills_tunnel_and_reminds(home, capsys):
     p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:

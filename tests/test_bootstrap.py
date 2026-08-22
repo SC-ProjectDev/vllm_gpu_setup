@@ -105,9 +105,11 @@ def test_dotenv_strips_quotes_comments_and_last_line(tmp_path, fakes):
     env, status = setup(tmp_path, fakes, detect_out="", detect_rc=2)
     dotenv = ROOT / ".env"
     assert not dotenv.exists(), "refusing to clobber a real .env"
-    # No trailing newline on the last line, an inline comment on the first,
-    # and both quote styles -- all must be handled.
-    dotenv.write_bytes(b'PROFILE="a100-80"  # pick\nHF_TOKEN=\'x\'')
+    # PROFILE is the last line with NO trailing newline, so the
+    # "SERVE a100-80" assertion actually depends on the `|| [[ -n "$k" ]]`
+    # guard reading a final, newline-less line. HF_TOKEN carries an inline
+    # comment and single quotes; PROFILE carries double quotes.
+    dotenv.write_bytes(b'HF_TOKEN=\'x\'  # tok\nPROFILE="a100-80"')
     try:
         del env["PROFILE"]
         r = run_bash(BOOT, env=env, cwd=tmp_path)
