@@ -118,6 +118,8 @@ def tunnel_cmd(cfg: dict, local_port: int) -> list[str]:
 def ssh_run(cfg: dict, remote_cmd: str, timeout: int = 20) -> str:
     try:
         r = subprocess.run(ssh_base(cfg) + [remote_cmd], capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            return f"(ssh failed rc={r.returncode}) {(r.stderr or r.stdout).strip()}"
         return (r.stdout or r.stderr).strip()
     except subprocess.TimeoutExpired:
         return "(ssh timed out)"

@@ -101,13 +101,31 @@ def _stop(srv):
     srv.server_close()
 
 
-def _fake_ssh(tmp_path, status_text: str):
-    """Fake ssh: `-N` -> sleep; otherwise echo a canned status + log tail.
+def _fake_ssh(tmp_path, status_text: str, exit_code: int = 0):
+    """Fake ssh: `-N` -> sleep; otherwise echo a canned status + log tail
+    (or, if `exit_code` is non-zero, write `status_text` to stderr and exit
+    with that code, simulating a failed remote command).
+
+    The status line is printed first (so callers that only look at the first
+    line, like `wait_ready`'s FAILED check, are unaffected), then an
+    `ARGV: ...` line with the full argv the fake ssh was invoked with, then
+    the canned log lines.
 
     Exits 2 if `-N` appears after the destination (`root@...`) argument,
     which is what OpenSSH sees as "run this as a remote command" instead of
     "open a tunnel" -- catches a regression in ssh argument ordering.
     """
+    if exit_code:
+        non_n_body = (
+            f"    sys.stderr.write({status_text!r} + '\\n')\n"
+            f"    sys.exit({exit_code!r})\n"
+        )
+    else:
+        non_n_body = (
+            f"    print({status_text!r})\n"
+            "    print('ARGV:', ' '.join(argv))\n"
+            "    print('log line 1'); print('log line 2')\n"
+        )
     script = tmp_path / "fake_ssh.py"
     script.write_text(
         "import sys, time\n"
@@ -119,7 +137,7 @@ def _fake_ssh(tmp_path, status_text: str):
         "if '-N' in argv:\n"
         "    time.sleep(120)\n"
         "else:\n"
-        f"    print({status_text!r}); print('log line 1'); print('log line 2')\n"
+        + non_n_body
     )
     if sys.platform == "win32":
         bat = tmp_path / "fake_ssh.bat"
@@ -235,7 +253,38 @@ def test_status_when_down(home, capsys):
     assert "tunnel: down" in out
 
 
-def test_logs_invokes_ssh_tail(home, monkeypatch, capsys):
+def test_status_gpu_line_shows_ssh_failure(home, monkeypatch, capsys):
+    srv = _health_server(ok_after=0)
+    monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "permission denied", exit_code=1))
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        gpu_llm.save_state({"pid": p.pid, "host": "h", "ssh_port": 22, "local_port": srv.server_port})
+        rc = gpu_llm.main(["status"])
+    finally:
+        _stop(srv)
+        try:
+            p.kill()
+        except OSError:
+            pass
+        p.wait(timeout=10)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "gpu: (ssh failed rc=1)" in out
+    assert "permission denied" in out
+
+
+def test_logs_invokes_ssh_tail(home, monkeypatch, capfd):
     monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "LOGLINE"))
     rc = gpu_llm.main(["logs", "--host", "h", "--port", "22"])
     assert rc == 0
+    out = capfd.readouterr().out
+    assert "tail -n 100 /var/log/vllm.log" in out
+    assert out.index("root@h") < out.index("tail")
+
+
+def test_logs_follow_passes_dash_f(home, monkeypatch, capfd):
+    monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "LOGLINE"))
+    rc = gpu_llm.main(["logs", "-f", "--host", "h", "--port", "22"])
+    assert rc == 0
+    out = capfd.readouterr().out
+    assert "tail -f -n 100 /var/log/vllm.log" in out
