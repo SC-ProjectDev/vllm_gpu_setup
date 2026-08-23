@@ -19,6 +19,9 @@
 
 ## On-start script
 
+Paste the contents of [`vast/onstart.sh`](onstart.sh) (one line). `gpu-llm up`
+sends the same file automatically, so manual and API rentals cannot drift.
+
 ```
 cd /root && git clone https://github.com/SC-ProjectDev/vllm_gpu_setup.git && cd vllm_gpu_setup && cp -n .env.example .env && nohup bash bootstrap.sh > /var/log/bootstrap.log 2>&1 &
 ```
