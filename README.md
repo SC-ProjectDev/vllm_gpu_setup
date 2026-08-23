@@ -89,11 +89,11 @@ Budget ~1 hour of rental. Record the values in the table at the end.
 
 | Metric | Value |
 |---|---|
-| Time to READY | |
-| smoke.sh tok/s | |
-| Peak VRAM used | |
-| Max stable max_model_len | |
-| Cost of run | |
+| Time to READY | ~10 min (2026-08-23, RTX 5090, weights cold) |
+| smoke.sh tok/s | 15.4 (32K ctx, cold) / 20.1 (49K ctx, warm) |
+| Peak VRAM used | 29,514 MiB of 32,607 |
+| Max stable max_model_len | 49152 (READY, health + completion verified) |
+| Cost of run | $0.592/hr (≈$0.60 for the ~1 h acceptance run) |
 
 ## Deferred (milestones 2–3)
 
