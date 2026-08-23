@@ -77,6 +77,27 @@ Status file values: `STARTING`, `READY`, `FAILED: <reason>`.
 Bootstrap exit codes: 2 unknown GPU, 3 `HF_TOKEN` required, 4 vLLM < 0.17 or
 not importable, 5 `curl` missing.
 
+## Monitoring a running instance
+
+All from the desktop, while the tunnel is up:
+
+- **Live throughput feed**: `python desktop/gpu_llm.py logs -f` — vLLM logs
+  avg prompt/generation tok/s and running/waiting request counts every ~10 s.
+- **Prometheus metrics (no ssh needed)**: vLLM serves them on the API port,
+  so `curl http://127.0.0.1:8000/metrics` works through the tunnel. Key
+  series: `vllm:generation_tokens_total` (sample twice to compute tok/s),
+  `vllm:num_requests_running`/`_waiting`, `vllm:gpu_cache_usage_perc`, and
+  TTFT / per-token latency histograms.
+- **GPU load**: `python desktop/gpu_llm.py status` shows VRAM; for
+  utilization/power/temp, ssh in and run
+  `nvidia-smi --query-gpu=utilization.gpu,memory.used,power.draw,temperature.gpu --format=csv,noheader`.
+
+Observed on the 5090 profile (M2 acceptance, single stream): ~9 tok/s
+generation during an agent coding session at only ~17% GPU util / 139 W —
+single-request decode is memory-bandwidth-bound and `--enforce-eager` taxes
+it further. Batched/concurrent requests are where the card's headroom is;
+aggregate throughput scales well past the single-stream number.
+
 ## Troubleshooting
 
 - **`REMOTE HOST IDENTIFICATION HAS CHANGED`**: Vast reuses hostnames like
@@ -135,4 +156,5 @@ Budget ~1 hour of rental. Record the values in the table at the end.
 ## Deferred (milestone 3)
 
 FastAPI control plane, 3090/4090 profiles (need patched vLLM), persistent
-weight volumes.
+weight volumes, `gpu-llm stats` subcommand (sample `/metrics` twice and
+print live tok/s + queue depth + KV-cache/VRAM in one shot).
