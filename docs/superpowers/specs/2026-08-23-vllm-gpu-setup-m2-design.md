@@ -158,7 +158,8 @@ api_key = "..."          # or VAST_API_KEY env (env wins)
 | No/invalid api key | Exit 1, point at https://cloud.vast.ai/manage-keys/ |
 | No offers under cap | Exit 1, show 3 cheapest offers above cap |
 | Rent request fails (4xx/5xx) | Exit 1, show response body; nothing to clean up |
-| Instance never reaches `running` | Ask to destroy, exit 1; state keeps the id either way |
+| Instance reaches a terminal state (`exited`/`offline`/`unknown`) without ever running | Ask to destroy, exit 1; state keeps the id either way |
+| Instance never reaches `running` before the wait timeout | No destroy prompt (it may still come up); exit 1, state keeps the id — `gpu-llm down` remains the remedy |
 | READY timeout after rent | Tunnel down, instance kept, id + cost + remedies printed |
 | Destroy fails | Warning + console link, state kept for retry |
 | API/network error mid-poll | Retry within the poll budget; only fail at timeout |

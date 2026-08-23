@@ -96,6 +96,11 @@ def pid_alive(pid: int, image: str | None = None) -> bool:
     we recorded -- otherwise a reused pid for an unrelated process is rejected.
     The match is on the stem, case-insensitively, so "ssh" (the CLI default),
     "ssh.exe" (what tasklist actually reports), and "SSH.EXE" all agree."""
+    if not pid:
+        # pid 0 means "no tunnel recorded" (crash-safe rent state); on Windows
+        # it matches the System Idle Process and on POSIX os.kill(0, 0) is a
+        # no-op that succeeds, so it must never be treated as "alive".
+        return False
     if sys.platform == "win32":
         out = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
@@ -391,6 +396,21 @@ def cmd_up(args) -> int:
         print(f"No Vast API key. Set VAST_API_KEY or api_key in {home() / 'config.toml'}")
         print(f"(create one at {MANAGE_KEYS_URL})")
         return 1
+    try:
+        return _cmd_up_body(args, cfg, api_key)
+    except vast_api.VastError as e:
+        print(f"Vast API error: {e}")
+        if e.code == 401:
+            print(f"Check your API key at {MANAGE_KEYS_URL}")
+        return 1
+
+
+def _cmd_up_body(args, cfg: dict, api_key: str) -> int:
+    """The rest of cmd_up, after the api-key check. Split out so cmd_up can wrap
+    every Vast API interaction here (stale-check list_instances, both
+    search_offers calls, rent_offer) in one try/except VastError -- state is
+    never cleared by any of these paths, so a mid-call VastError just leaves
+    whatever was on disk before the call."""
     st = load_state()
     if st:
         # pid 0 means "no tunnel recorded" (crash-safe rent state); pid_alive(0)
@@ -415,10 +435,13 @@ def cmd_up(args) -> int:
     if not args.yes and not confirm("rent? [y/N] "):
         print("Nothing rented.")
         return 0
+    # Computed once, before renting, so a `dph_total`-less offer never loses
+    # the instance id to a KeyError after a successful (billing) rent.
+    dph = offer.get("dph_total", 0.0)
     onstart = (REPO_ROOT / "vast" / "onstart.sh").read_text(encoding="utf-8")
     iid = vast_api.rent_offer(api_key, offer["id"], IMAGE, DISK_GB, onstart)
-    save_state({"pid": 0, "instance_id": iid, "gpu": args.gpu, "dph": offer["dph_total"]})
-    print(f"Rented instance {iid} at ${offer['dph_total']:.3f}/hr. Waiting for SSH info...")
+    save_state({"pid": 0, "instance_id": iid, "gpu": args.gpu, "dph": dph})
+    print(f"Rented instance {iid} at ${dph:.3f}/hr. Waiting for SSH info...")
     inst, status = wait_instance_running(api_key, iid, INSTANCE_WAIT_SECS)
     if status != "running":
         print(f"Instance {iid} did not reach running ({status}); it is still rented.")
@@ -431,7 +454,6 @@ def cmd_up(args) -> int:
     cfg = {**cfg, "host": inst["ssh_host"], "ssh_port": int(inst["ssh_port"]),
            "local_port": cfg.get("local_port", DEFAULT_LOCAL_PORT)}
     rc = open_tunnel_and_wait(cfg, args.timeout, args.interval)
-    dph = offer["dph_total"]
     if rc == 0:
         print(f"instance {iid} at ${dph:.3f}/hr — `gpu-llm down` destroys it.")
     else:
@@ -453,12 +475,12 @@ def state_cfg(st: dict) -> dict:
 
 def cmd_status(args) -> int:
     st = load_state()
-    if not st or not pid_alive(st["pid"], st.get("image")):
+    if st and st.get("instance_id"):
+        print(f"instance: {st['instance_id']} (${st.get('dph', 0):.3f}/hr)")
+    if not st or not pid_alive(st.get("pid"), st.get("image")):
         print("tunnel: down")
         return 1
-    print(f"tunnel: up (pid {st['pid']}) 127.0.0.1:{st['local_port']} -> {st['host']}:{REMOTE_PORT}")
-    if st.get("instance_id"):
-        print(f"instance: {st['instance_id']} (${st.get('dph', 0):.3f}/hr)")
+    print(f"tunnel: up (pid {st['pid']}) 127.0.0.1:{st.get('local_port')} -> {st.get('host')}:{REMOTE_PORT}")
     code, body = http_get(f"http://127.0.0.1:{st['local_port']}/v1/models", timeout=3.0)
     if code == 200:
         try:

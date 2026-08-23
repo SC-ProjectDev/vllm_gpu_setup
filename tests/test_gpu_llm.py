@@ -41,6 +41,12 @@ def test_pid_alive_for_self_and_dead():
     assert not gpu_llm.pid_alive(p.pid)
 
 
+def test_pid_alive_zero_is_false():
+    # pid 0 means "no tunnel recorded" (crash-safe rent state) -- it must never
+    # read as alive (System Idle Process on Windows, os.kill(0,0) on POSIX).
+    assert not gpu_llm.pid_alive(0)
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="tasklist image matching is Windows-only")
 def test_pid_alive_image_match_is_stem_and_case_insensitive():
     p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -234,6 +240,30 @@ def test_cmd_tunnel_failure_kills_ssh_and_returns_1(home, monkeypatch, capsys):
     assert "FAILED: vllm 0.16 < 0.17" in capsys.readouterr().out
 
 
+def test_tunnel_failure_preserves_instance_id_when_present(home, monkeypatch, capsys):
+    # A failed tunnel must merge_state({"pid": 0}) -- not clear_state -- when
+    # state holds a billing instance_id, so `down`/`status` can still find it.
+    srv = _health_server(ok_after=10_000)
+    monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "FAILED: vllm 0.16 < 0.17"))
+    gpu_llm.save_state({"pid": 0, "instance_id": 4242, "host": "h", "ssh_port": 22,
+                        "gpu": "5090", "dph": 0.592})
+    try:
+        rc = gpu_llm.main(["tunnel", "--host", "h", "--port", "22",
+                           "--local", str(srv.server_port), "--timeout", "20", "--interval", "0.2"])
+    finally:
+        _stop(srv)
+    assert rc == 1
+    st = gpu_llm.load_state()
+    assert st is not None
+    assert st["instance_id"] == 4242
+    assert st["pid"] == 0
+
+
+# The "no instance_id -> clear_state" side of this invariant is already
+# covered by test_cmd_tunnel_failure_kills_ssh_and_returns_1 above, which
+# asserts load_state() is None after a tunnel failure with no instance_id.
+
+
 def test_cmd_tunnel_ssh_dying_mid_wait_returns_1_fast(home, monkeypatch, capsys):
     srv = _health_server(ok_after=10_000)  # never becomes healthy on its own
     monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "STARTING", tunnel_exit=7))
@@ -373,6 +403,18 @@ def test_status_shows_instance_line(home, monkeypatch, capsys):
     assert "instance: 4242 ($0.592/hr)" in out
 
 
+def test_status_pid_zero_state_shows_instance_and_no_traceback(home, capsys):
+    # A rent that never reached "running" leaves pid 0 in state; status must
+    # not crash trying to read tunnel-only fields (local_port, host) that a
+    # pid-0 state lacks, and it must still surface the billing instance.
+    gpu_llm.save_state({"pid": 0, "instance_id": 4242, "dph": 0.592, "gpu": "5090"})
+    rc = gpu_llm.main(["status"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "instance: 4242 ($0.592/hr)" in out
+    assert "tunnel: down" in out
+
+
 @pytest.fixture
 def up_env(home, monkeypatch):
     """cmd_up with all externals stubbed: api calls recorded, tunnel skipped."""
@@ -416,6 +458,20 @@ def test_up_happy_path_rents_and_tunnels(up_env, capsys):
     assert "gpu-llm down" in out                           # cost reminder printed
 
 
+def test_up_offer_without_dph_total_still_records_instance(up_env, capsys):
+    # A KeyError reading offer["dph_total"] after rent_offer returns would lose
+    # the instance id -- the design's cardinal failure mode (billing instance
+    # never recorded). dph must default to 0.0 and the id must still be saved.
+    offer_no_dph = {"id": 7, "gpu_name": "RTX 5090"}
+    up_env["offers"] = [offer_no_dph]
+    up_env["instances"] = [RUNNING]
+    rc = gpu_llm.main(["up", "--yes"])
+    assert rc == 0
+    st = gpu_llm.load_state()
+    assert st["instance_id"] == 4242
+    assert st["dph"] == 0.0
+
+
 def test_up_no_api_key_exits_1(up_env, monkeypatch, capsys):
     monkeypatch.delenv("VAST_API_KEY")
     rc = gpu_llm.main(["up", "--yes"])
@@ -436,6 +492,18 @@ def test_up_no_offers_lists_over_cap_and_exits_1(up_env, monkeypatch, capsys):
     assert up_env["rented"] == []
     assert out.count("RTX 5090") == 3                     # exactly 3 over-cap offers shown
     assert "dph_total" not in seen_queries[1]             # second query uncapped
+
+
+def test_up_vast_error_401_prints_manage_keys_hint_no_traceback(up_env, monkeypatch, capsys):
+    def boom(k, q):
+        raise gpu_llm.vast_api.VastError("bad key", code=401)
+    monkeypatch.setattr(gpu_llm.vast_api, "search_offers", boom)
+    rc = gpu_llm.main(["up", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "manage-keys" in out
+    assert "Traceback" not in out
+    assert up_env["rented"] == []
 
 
 def test_up_decline_rents_nothing(up_env, monkeypatch, capsys):
