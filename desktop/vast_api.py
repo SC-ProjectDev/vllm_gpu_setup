@@ -59,3 +59,53 @@ def format_offer(offer: dict) -> str:
     if offer.get("geolocation"):
         parts.append(str(offer["geolocation"]))
     return " · ".join(parts)
+
+
+def _api_base() -> str:
+    return os.environ.get("VAST_API_BASE", DEFAULT_API_BASE)
+
+
+def api_request(method: str, path: str, api_key: str, body: dict | None = None,
+                timeout: float = 30.0) -> dict:
+    url = f"{_api_base()}{path}"
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:300]
+        e.close()
+        raise VastError(f"{method} {path} -> HTTP {e.code}: {detail}", code=e.code) from e
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise VastError(f"{method} {path} failed: {e}") from e
+
+
+def search_offers(api_key: str, query: dict) -> list[dict]:
+    return api_request("POST", "/api/v0/bundles", api_key, body=query).get("offers", [])
+
+
+def rent_offer(api_key: str, offer_id: int, image: str, disk: int, onstart: str) -> int:
+    body = {"image": image, "disk": disk, "env": "", "onstart": onstart, "runtype": "ssh"}
+    resp = api_request("PUT", f"/api/v0/asks/{offer_id}", api_key, body=body)
+    iid = resp.get("new_contract")
+    if not iid:
+        raise VastError(f"rent succeeded without new_contract: {resp}")
+    return int(iid)
+
+
+def list_instances(api_key: str) -> list[dict]:
+    return api_request("GET", "/api/v1/instances", api_key).get("instances", [])
+
+
+def destroy_instance(api_key: str, instance_id: int) -> bool:
+    try:
+        api_request("DELETE", f"/api/v0/instances/{instance_id}", api_key)
+        return True
+    except VastError as e:
+        if e.code == 404:
+            return False
+        raise
