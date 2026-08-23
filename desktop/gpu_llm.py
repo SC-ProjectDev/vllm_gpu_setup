@@ -331,20 +331,24 @@ def confirm(prompt: str) -> bool:
 def wait_instance_running(api_key: str, instance_id: int, timeout: float,
                           interval: float = 10.0, progress=print) -> tuple[dict | None, str]:
     deadline = time.monotonic() + timeout
+    next_poll = 0.0
     while time.monotonic() < deadline:
-        try:
-            inst = next((i for i in vast_api.list_instances(api_key)
-                         if i.get("id") == instance_id), None)
-        except vast_api.VastError as e:
-            progress(f"[vast] {e} (retrying)")
-            inst = None
-        if inst:
-            status = inst.get("actual_status")
-            if status == "running" and inst.get("ssh_host") and inst.get("ssh_port"):
-                return inst, "running"
-            if status in ("exited", "offline", "unknown"):
-                return inst, status
-            progress(f"[vast] instance {instance_id}: {status or 'starting'}...")
+        now = time.monotonic()
+        if now >= next_poll:
+            next_poll = now + interval
+            try:
+                inst = next((i for i in vast_api.list_instances(api_key)
+                             if i.get("id") == instance_id), None)
+            except vast_api.VastError as e:
+                progress(f"[vast] {e} (retrying)")
+                inst = None
+            if inst:
+                status = inst.get("actual_status")
+                if status == "running" and inst.get("ssh_host") and inst.get("ssh_port"):
+                    return inst, "running"
+                if status in ("exited", "offline", "unknown"):
+                    return inst, status
+                progress(f"[vast] instance {instance_id}: {status or 'starting'}...")
         time.sleep(min(1.0, interval))
     return None, "timeout"
 

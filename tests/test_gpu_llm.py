@@ -481,6 +481,15 @@ def test_wait_instance_running_timeout(up_env, monkeypatch):
     assert inst is None and status == "timeout"
 
 
+def test_wait_instance_running_polls_at_interval(home, monkeypatch):
+    calls = []
+    monkeypatch.setattr(gpu_llm.vast_api, "list_instances",
+                        lambda k: calls.append(1) or [])
+    inst, status = gpu_llm.wait_instance_running("K", 1, timeout=0.35, interval=10.0)
+    assert status == "timeout"
+    assert len(calls) == 1   # only the immediate first poll; next would be at t=10s
+
+
 def test_confirm_yes_no(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
     assert gpu_llm.confirm("rent? ")
