@@ -371,3 +371,118 @@ def test_status_shows_instance_line(home, monkeypatch, capsys):
     gpu_llm.main(["status"])
     out = capsys.readouterr().out
     assert "instance: 4242 ($0.592/hr)" in out
+
+
+@pytest.fixture
+def up_env(home, monkeypatch):
+    """cmd_up with all externals stubbed: api calls recorded, tunnel skipped."""
+    calls = {"destroyed": [], "rented": [], "tunnel": 0}
+    monkeypatch.setenv("VAST_API_KEY", "K")
+    def _search(k, q):
+        calls.setdefault("queries", []).append(q)
+        return calls.get("offers", [])
+    monkeypatch.setattr(gpu_llm.vast_api, "search_offers", _search)
+    monkeypatch.setattr(gpu_llm.vast_api, "rent_offer",
+                        lambda k, oid, image, disk, onstart: calls["rented"].append((oid, image, disk, onstart)) or 4242)
+    monkeypatch.setattr(gpu_llm.vast_api, "list_instances",
+                        lambda k: calls.get("instances", []))
+    monkeypatch.setattr(gpu_llm.vast_api, "destroy_instance",
+                        lambda k, iid: calls["destroyed"].append(iid) or True)
+    monkeypatch.setattr(gpu_llm, "open_tunnel_and_wait",
+                        lambda cfg, timeout, interval: calls.__setitem__("tunnel", calls["tunnel"] + 1) or 0)
+    monkeypatch.setattr(gpu_llm, "confirm", lambda prompt: True)
+    return calls
+
+
+OFFER = {"id": 7, "dph_total": 0.592, "gpu_name": "RTX 5090",
+         "inet_down": 812.0, "reliability2": 0.992, "geolocation": "US"}
+RUNNING = {"id": 4242, "actual_status": "running", "ssh_host": "ssh9.vast.ai", "ssh_port": 41000}
+
+
+def test_up_happy_path_rents_and_tunnels(up_env, capsys):
+    up_env["offers"] = [OFFER]
+    up_env["instances"] = [RUNNING]
+    rc = gpu_llm.main(["up", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert up_env["rented"][0][0] == 7
+    assert up_env["rented"][0][1] == "vllm/vllm-openai:v0.27.1"
+    assert up_env["rented"][0][2] == 60
+    assert "git clone" in up_env["rented"][0][3]          # onstart.sh content
+    assert up_env["tunnel"] == 1
+    st = gpu_llm.load_state()
+    assert st["instance_id"] == 4242 and st["gpu"] == "5090" and st["dph"] == 0.592
+    assert st["host"] == "ssh9.vast.ai" and st["ssh_port"] == 41000
+    assert "gpu-llm down" in out                           # cost reminder printed
+
+
+def test_up_no_api_key_exits_1(up_env, monkeypatch, capsys):
+    monkeypatch.delenv("VAST_API_KEY")
+    rc = gpu_llm.main(["up", "--yes"])
+    assert rc == 1
+    assert "manage-keys" in capsys.readouterr().out
+    assert up_env["rented"] == []
+
+
+def test_up_no_offers_lists_over_cap_and_exits_1(up_env, monkeypatch, capsys):
+    seen_queries = []
+    def search(k, q):
+        seen_queries.append(q)
+        return [] if "dph_total" in q else [OFFER, OFFER, OFFER, OFFER]
+    monkeypatch.setattr(gpu_llm.vast_api, "search_offers", search)
+    rc = gpu_llm.main(["up", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert up_env["rented"] == []
+    assert out.count("RTX 5090") == 3                     # exactly 3 over-cap offers shown
+    assert "dph_total" not in seen_queries[1]             # second query uncapped
+
+
+def test_up_decline_rents_nothing(up_env, monkeypatch, capsys):
+    up_env["offers"] = [OFFER]
+    monkeypatch.setattr(gpu_llm, "confirm", lambda prompt: False)
+    rc = gpu_llm.main(["up"])
+    assert rc == 0
+    assert up_env["rented"] == []
+    assert "Nothing rented" in capsys.readouterr().out
+
+
+def test_up_dead_on_arrival_asks_destroy(up_env, monkeypatch, capsys):
+    up_env["offers"] = [OFFER]
+    up_env["instances"] = [{"id": 4242, "actual_status": "exited"}]
+    monkeypatch.setattr(gpu_llm, "confirm", lambda prompt: True)  # yes to destroy
+    rc = gpu_llm.main(["up", "--yes"])
+    assert rc == 1
+    assert up_env["destroyed"] == [4242]
+    assert gpu_llm.load_state() is None
+
+
+def test_up_refuses_when_instance_recorded_and_live(up_env, capsys):
+    gpu_llm.save_state({"pid": 0, "instance_id": 4242})
+    up_env["instances"] = [RUNNING]
+    rc = gpu_llm.main(["up", "--yes"])
+    assert rc == 1
+    assert "down" in capsys.readouterr().out
+    assert up_env["rented"] == []
+
+
+def test_up_clears_stale_state_and_proceeds(up_env, capsys):
+    gpu_llm.save_state({"pid": 999999999, "instance_id": 1111})   # dead pid, gone instance
+    up_env["offers"] = [OFFER]
+    up_env["instances"] = [RUNNING]                                # 1111 not present
+    rc = gpu_llm.main(["up", "--yes"])
+    assert rc == 0
+    assert gpu_llm.load_state()["instance_id"] == 4242
+
+
+def test_wait_instance_running_timeout(up_env, monkeypatch):
+    monkeypatch.setattr(gpu_llm.vast_api, "list_instances", lambda k: [])
+    inst, status = gpu_llm.wait_instance_running("K", 4242, timeout=0.3, interval=0.1)
+    assert inst is None and status == "timeout"
+
+
+def test_confirm_yes_no(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert gpu_llm.confirm("rent? ")
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    assert not gpu_llm.confirm("rent? ")

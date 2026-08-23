@@ -26,6 +26,13 @@ STATUS_FILE = "/var/log/vllm.status"
 LOG_FILE = "/var/log/vllm.log"
 BOOTSTRAP_LOG = "/var/log/bootstrap.log"
 
+IMAGE = "vllm/vllm-openai:v0.27.1"
+DISK_GB = 60
+INSTANCE_WAIT_SECS = 600
+REPO_ROOT = Path(__file__).resolve().parent.parent
+MANAGE_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
+CONSOLE_INSTANCES_URL = "https://cloud.vast.ai/instances/"
+
 
 # ---------- config / state ----------
 
@@ -314,6 +321,101 @@ def cmd_tunnel(args) -> int:
     return open_tunnel_and_wait(cfg, args.timeout, args.interval)
 
 
+def confirm(prompt: str) -> bool:
+    try:
+        return input(prompt).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def wait_instance_running(api_key: str, instance_id: int, timeout: float,
+                          interval: float = 10.0, progress=print) -> tuple[dict | None, str]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            inst = next((i for i in vast_api.list_instances(api_key)
+                         if i.get("id") == instance_id), None)
+        except vast_api.VastError as e:
+            progress(f"[vast] {e} (retrying)")
+            inst = None
+        if inst:
+            status = inst.get("actual_status")
+            if status == "running" and inst.get("ssh_host") and inst.get("ssh_port"):
+                return inst, "running"
+            if status in ("exited", "offline", "unknown"):
+                return inst, status
+            progress(f"[vast] instance {instance_id}: {status or 'starting'}...")
+        time.sleep(min(1.0, interval))
+    return None, "timeout"
+
+
+def _destroy_and_report(api_key: str, instance_id: int) -> None:
+    try:
+        gone = vast_api.destroy_instance(api_key, instance_id)
+        print(f"instance {instance_id} {'destroyed' if gone else 'already gone'}.")
+        clear_state()
+    except vast_api.VastError as e:
+        print(f"WARNING: destroy failed ({e}). Instance {instance_id} may still be billing!")
+        print(f"Check {CONSOLE_INSTANCES_URL} — state kept; re-run `down` to retry.")
+
+
+def cmd_up(args) -> int:
+    cfg = load_config()
+    api_key = resolve_api_key(cfg)
+    if not api_key:
+        print(f"No Vast API key. Set VAST_API_KEY or api_key in {home() / 'config.toml'}")
+        print(f"(create one at {MANAGE_KEYS_URL})")
+        return 1
+    st = load_state()
+    if st:
+        # pid 0 means "no tunnel recorded" (crash-safe rent state); pid_alive(0)
+        # must not be consulted — on Windows it matches the System Idle Process.
+        pid_live = bool(st.get("pid")) and pid_alive(st["pid"], st.get("image"))
+        inst_live = st.get("instance_id") and any(
+            i.get("id") == st["instance_id"] for i in vast_api.list_instances(api_key))
+        if pid_live or inst_live:
+            print("Already up (tunnel or instance recorded); run `down` first.")
+            return 1
+        clear_state()  # stale: dead pid, instance gone
+    max_price = resolve_max_price(cfg, args.gpu, args.max_price)
+    offers = vast_api.search_offers(api_key, vast_api.build_offer_query(args.gpu, max_price))
+    if not offers:
+        print(f"No {args.gpu} offers under ${max_price:.2f}/hr. Cheapest above the cap:")
+        over = vast_api.search_offers(api_key, vast_api.build_offer_query(args.gpu, None))
+        for o in sorted(over, key=lambda o: o.get("dph_total", float("inf")))[:3]:
+            print(f"  {vast_api.format_offer(o)}")
+        return 1
+    offer = vast_api.pick_offer(offers)
+    print(vast_api.format_offer(offer))
+    if not args.yes and not confirm("rent? [y/N] "):
+        print("Nothing rented.")
+        return 0
+    onstart = (REPO_ROOT / "vast" / "onstart.sh").read_text(encoding="utf-8")
+    iid = vast_api.rent_offer(api_key, offer["id"], IMAGE, DISK_GB, onstart)
+    save_state({"pid": 0, "instance_id": iid, "gpu": args.gpu, "dph": offer["dph_total"]})
+    print(f"Rented instance {iid} at ${offer['dph_total']:.3f}/hr. Waiting for SSH info...")
+    inst, status = wait_instance_running(api_key, iid, INSTANCE_WAIT_SECS)
+    if status != "running":
+        print(f"Instance {iid} did not reach running ({status}); it is still rented.")
+        if status != "timeout" and confirm(f"Destroy instance {iid}? [y/N] "):
+            _destroy_and_report(api_key, iid)
+        else:
+            print(f"`gpu-llm down` destroys it; {CONSOLE_INSTANCES_URL} to inspect.")
+        return 1
+    merge_state({"host": inst["ssh_host"], "ssh_port": int(inst["ssh_port"])})
+    cfg = {**cfg, "host": inst["ssh_host"], "ssh_port": int(inst["ssh_port"]),
+           "local_port": cfg.get("local_port", DEFAULT_LOCAL_PORT)}
+    rc = open_tunnel_and_wait(cfg, args.timeout, args.interval)
+    dph = offer["dph_total"]
+    if rc == 0:
+        print(f"instance {iid} at ${dph:.3f}/hr — `gpu-llm down` destroys it.")
+    else:
+        print(f"Instance {iid} is still rented at ${dph:.3f}/hr:")
+        print("  `gpu-llm down`   destroys it")
+        print("  `gpu-llm tunnel` retries the tunnel (host/port already recorded)")
+    return rc
+
+
 def state_cfg(st: dict) -> dict:
     """Build an ssh cfg (host/ssh_port/ssh_key) from saved tunnel state, pulling
     ssh_key from config.toml if one is set there."""
@@ -374,6 +476,14 @@ def build_parser() -> argparse.ArgumentParser:
     l.add_argument("-f", "--follow", action="store_true")
     l.add_argument("--host"); l.add_argument("--port", type=int)
     l.set_defaults(fn=cmd_logs)
+
+    u = sub.add_parser("up", help="rent a Vast GPU, wait for READY, open the tunnel")
+    u.add_argument("--gpu", choices=sorted(vast_api.GPU_FILTERS), default="5090")
+    u.add_argument("--max-price", type=float, default=None, help="max $/hr (default per GPU)")
+    u.add_argument("--yes", action="store_true", help="skip the rent confirmation")
+    u.add_argument("--timeout", type=int, default=900)
+    u.add_argument("--interval", type=float, default=30.0)
+    u.set_defaults(fn=cmd_up)
 
     d = sub.add_parser("down", help="close the tunnel")
     d.set_defaults(fn=cmd_down)
