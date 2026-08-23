@@ -15,10 +15,12 @@ vLLM's OpenAI-compatible API, tunnelled to your desktop at
 `%USERPROFILE%\.gpu-llm\config.toml`:
 
 ```toml
-host = "ssh5.vast.ai"   # from the Vast instance's SSH button
-ssh_port = 12345
+api_key = "..."          # Vast API key, from https://cloud.vast.ai/manage-keys/
+                          # (or set the VAST_API_KEY env var instead)
 local_port = 8000
 # ssh_key = "C:/Users/you/.ssh/id_ed25519"   # optional
+# host / ssh_port only needed for the manual-rental fallback below —
+# `up`/`down`/`status` record these automatically once an instance is rented.
 ```
 
 `%USERPROFILE%\.config\llm-cli\config.toml` (only lines that change):
@@ -31,12 +33,25 @@ coder_model = "qwen"
 
 ## Daily loop
 
-1. Rent an instance using `vast/template.md` (5090 filter). Copy host/port into `config.toml`.
-2. `python desktop/gpu_llm.py tunnel` — opens the tunnel and prints instance
-   progress every 30 s until `READY` (5–10 min cold).
-3. Use `llm-cli chat`, `llm-cli code`, `llm-cli agent` as usual.
-4. `python desktop/gpu_llm.py status` / `logs -f` when curious.
-5. `python desktop/gpu_llm.py down`, then **destroy the instance in the Vast console**.
+1. `python desktop/gpu_llm.py up` — searches Vast for the cheapest offer
+   (`--gpu 5090` is the default; pick another with `--gpu`), shows the $/hr
+   offer, and asks to confirm before renting (`--yes` skips the prompt).
+   It rents, waits for the instance to come up, opens the tunnel, and prints
+   `vLLM is READY.` (5–10 min cold).
+2. Use `llm-cli chat`, `llm-cli code`, `llm-cli agent` as usual.
+3. `python desktop/gpu_llm.py status` / `logs -f` when curious.
+4. `python desktop/gpu_llm.py down` — closes the tunnel **and destroys the
+   Vast instance**, so nothing keeps billing. Pass `--keep` to close the
+   tunnel but leave the instance running (e.g. to reconnect later with
+   `gpu-llm tunnel`); a plain `down` afterwards destroys it.
+
+### Fallback: manual rental
+
+If you'd rather rent by hand (or don't have a Vast API key configured), rent
+an instance using `vast/template.md`, copy host/port into `config.toml`, and
+run `python desktop/gpu_llm.py tunnel` instead of `up`. In this mode `down`
+only closes the tunnel — it does not know about a manually-rented instance,
+so you still need to **destroy the instance in the Vast console** yourself.
 
 ## Instance-side scripts
 
@@ -95,7 +110,20 @@ Budget ~1 hour of rental. Record the values in the table at the end.
 | Max stable max_model_len | 49152 (READY, health + completion verified) |
 | Cost of run | $0.592/hr (≈$0.60 for the ~1 h acceptance run) |
 
-## Deferred (milestones 2–3)
+## Milestone 2 acceptance run (paid, ~30 min)
 
-FastAPI control plane, Vast API provisioning (`gpu-llm up`), 3090/4090
-profiles (need patched vLLM), persistent weight volumes, auto-teardown.
+- [ ] `python desktop/gpu_llm.py up` — offer shown with $/hr, confirm, READY,
+      `llm-cli health` + `chat` work.
+- [ ] `python desktop/gpu_llm.py status` shows `instance: <id> ($/hr)`.
+- [ ] `python desktop/gpu_llm.py down` — instance destroyed; verify gone in
+      the console.
+- [ ] `python desktop/gpu_llm.py up --yes --max-price 0.05` exits 1 with the
+      over-cap listing; rents nothing.
+- [ ] Verify `GPU_FILTERS` gpu_name spellings against the live offers seen
+      above; fix the table if Vast spells any differently.
+- [ ] Record: time from `up` to READY, total cost.
+
+## Deferred (milestone 3)
+
+FastAPI control plane, 3090/4090 profiles (need patched vLLM), persistent
+weight volumes.

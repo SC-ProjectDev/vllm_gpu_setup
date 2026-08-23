@@ -495,3 +495,74 @@ def test_confirm_yes_no(monkeypatch):
     assert gpu_llm.confirm("rent? ")
     monkeypatch.setattr("builtins.input", lambda prompt: "")
     assert not gpu_llm.confirm("rent? ")
+
+
+def test_down_destroys_recorded_instance(home, monkeypatch, capsys):
+    monkeypatch.setenv("VAST_API_KEY", "K")
+    destroyed = []
+    monkeypatch.setattr(gpu_llm.vast_api, "destroy_instance",
+                        lambda k, iid: destroyed.append(iid) or True)
+    gpu_llm.save_state({"pid": 999999999, "host": "h", "ssh_port": 22,
+                       "local_port": 8000, "instance_id": 4242, "dph": 0.592})
+    rc = gpu_llm.main(["down"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert destroyed == [4242]
+    assert "destroyed" in out
+    assert gpu_llm.load_state() is None
+
+
+def test_down_keep_skips_destroy_and_keeps_state(home, monkeypatch, capsys):
+    monkeypatch.setenv("VAST_API_KEY", "K")
+    monkeypatch.setattr(gpu_llm.vast_api, "destroy_instance",
+                        lambda k, iid: pytest.fail("destroy called despite --keep"))
+    gpu_llm.save_state({"pid": 999999999, "host": "h", "ssh_port": 22,
+                       "local_port": 8000, "instance_id": 4242})
+    rc = gpu_llm.main(["down", "--keep"])
+    assert rc == 0
+    assert gpu_llm.load_state()["instance_id"] == 4242
+    assert "kept" in capsys.readouterr().out.lower()
+
+
+def test_down_destroy_failure_warns_and_keeps_state(home, monkeypatch, capsys):
+    monkeypatch.setenv("VAST_API_KEY", "K")
+    def boom(k, iid):
+        raise gpu_llm.vast_api.VastError("rate limited", code=429)
+    monkeypatch.setattr(gpu_llm.vast_api, "destroy_instance", boom)
+    gpu_llm.save_state({"pid": 999999999, "host": "h", "ssh_port": 22,
+                       "local_port": 8000, "instance_id": 4242})
+    rc = gpu_llm.main(["down"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "WARNING" in out and "billing" in out
+    assert gpu_llm.load_state()["instance_id"] == 4242
+
+
+def test_down_instance_already_gone_clears_state(home, monkeypatch, capsys):
+    monkeypatch.setenv("VAST_API_KEY", "K")
+    monkeypatch.setattr(gpu_llm.vast_api, "destroy_instance", lambda k, iid: False)
+    gpu_llm.save_state({"pid": 999999999, "host": "h", "ssh_port": 22,
+                       "local_port": 8000, "instance_id": 4242})
+    rc = gpu_llm.main(["down"])
+    assert rc == 0
+    assert "already gone" in capsys.readouterr().out
+    assert gpu_llm.load_state() is None
+
+
+def test_down_manual_rental_keeps_m1_reminder(home, capsys):
+    gpu_llm.save_state({"pid": 999999999, "host": "h", "ssh_port": 22, "local_port": 8000})
+    rc = gpu_llm.main(["down"])
+    assert rc == 0
+    assert "still billing" in capsys.readouterr().out
+    assert gpu_llm.load_state() is None
+
+
+def test_down_with_instance_but_no_api_key_warns(home, monkeypatch, capsys):
+    monkeypatch.delenv("VAST_API_KEY", raising=False)
+    gpu_llm.save_state({"pid": 999999999, "host": "h", "ssh_port": 22,
+                       "local_port": 8000, "instance_id": 4242})
+    rc = gpu_llm.main(["down"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "4242" in out and "key" in out.lower()
+    assert gpu_llm.load_state()["instance_id"] == 4242

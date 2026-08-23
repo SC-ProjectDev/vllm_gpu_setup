@@ -231,14 +231,35 @@ def cmd_down(args) -> int:
     if not st:
         print("No tunnel recorded (nothing to do).")
         return 0
-    if pid_alive(st["pid"], st.get("image")):
+    if st.get("pid") and pid_alive(st["pid"], st.get("image")):
         kill_pid(st["pid"])
         print(f"Tunnel pid {st['pid']} stopped.")
-    else:
+    elif st.get("pid"):
         print(f"Tunnel pid {st['pid']} was already gone.")
-    clear_state()
-    print("Reminder: the Vast instance is still billing — destroy it in the Vast console.")
-    return 0
+    iid = st.get("instance_id")
+    if not iid:
+        clear_state()
+        print("Reminder: the Vast instance is still billing — destroy it in the Vast console.")
+        return 0
+    if getattr(args, "keep", False):
+        merge_state({"pid": 0})
+        print(f"instance {iid} kept (still billing); plain `down` destroys it later.")
+        return 0
+    api_key = resolve_api_key(load_config())
+    if not api_key:
+        print(f"WARNING: instance {iid} is recorded but no Vast API key is configured —")
+        print(f"it may still be billing. Set VAST_API_KEY (see {MANAGE_KEYS_URL}) and re-run `down`,")
+        print(f"or destroy it at {CONSOLE_INSTANCES_URL}")
+        return 1
+    try:
+        gone = vast_api.destroy_instance(api_key, iid)
+        print(f"instance {iid} {'destroyed' if gone else 'already gone'}.")
+        clear_state()
+        return 0
+    except vast_api.VastError as e:
+        print(f"WARNING: destroy failed ({e}). Instance {iid} may still be billing!")
+        print(f"Check {CONSOLE_INSTANCES_URL} — state kept; re-run `down` to retry.")
+        return 1
 
 
 def wait_ready(cfg: dict, local_port: int, timeout: float, interval: float, progress=print,
@@ -490,6 +511,7 @@ def build_parser() -> argparse.ArgumentParser:
     u.set_defaults(fn=cmd_up)
 
     d = sub.add_parser("down", help="close the tunnel")
+    d.add_argument("--keep", action="store_true", help="kill the tunnel but keep the instance")
     d.set_defaults(fn=cmd_down)
     return p
 
