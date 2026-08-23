@@ -405,6 +405,19 @@ def cmd_up(args) -> int:
         return 1
 
 
+def choose_offer(offers: list[dict]) -> dict | None:
+    """Print a numbered offer list and return the chosen offer, or None to abort."""
+    for i, o in enumerate(offers, 1):
+        print(f"{i}. {vast_api.format_offer(o)} · offer {o.get('id', '?')}")
+    try:
+        raw = input(f"rent which? [1-{len(offers)}, Enter aborts] ").strip()
+    except EOFError:
+        return None
+    if raw.isdigit() and 1 <= int(raw) <= len(offers):
+        return offers[int(raw) - 1]
+    return None
+
+
 def _cmd_up_body(args, cfg: dict, api_key: str) -> int:
     """The rest of cmd_up, after the api-key check. Split out so cmd_up can wrap
     every Vast API interaction here (stale-check list_instances, both
@@ -422,19 +435,41 @@ def _cmd_up_body(args, cfg: dict, api_key: str) -> int:
             print("Already up (tunnel or instance recorded); run `down` first.")
             return 1
         clear_state()  # stale: dead pid, instance gone
+    filters = cfg.get("filters") or {}
     max_price = resolve_max_price(cfg, args.gpu, args.max_price)
-    offers = vast_api.search_offers(api_key, vast_api.build_offer_query(args.gpu, max_price))
-    if not offers:
-        print(f"No {args.gpu} offers under ${max_price:.2f}/hr. Cheapest above the cap:")
-        over = vast_api.search_offers(api_key, vast_api.build_offer_query(args.gpu, None))
-        for o in sorted(over, key=lambda o: o.get("dph_total", float("inf")))[:3]:
-            print(f"  {vast_api.format_offer(o)}")
-        return 1
-    offer = vast_api.pick_offer(offers)
-    print(vast_api.format_offer(offer))
-    if not args.yes and not confirm("rent? [y/N] "):
-        print("Nothing rented.")
-        return 0
+    if args.offer:
+        # Rent a specific offer id (e.g. spotted in the Vast console). The
+        # uncapped search is only a details lookup — renting proceeds either way.
+        found = [o for o in vast_api.search_offers(
+                     api_key, vast_api.build_offer_query(args.gpu, None, filters))
+                 if o.get("id") == args.offer]
+        offer = found[0] if found else {"id": args.offer}
+        if found:
+            print(f"{vast_api.format_offer(offer)} · offer {offer['id']}")
+        else:
+            print(f"offer {args.offer} (details not found in search; renting by id)")
+        if not args.yes and not confirm("rent? [y/N] "):
+            print("Nothing rented.")
+            return 0
+    else:
+        offers = vast_api.search_offers(
+            api_key, vast_api.build_offer_query(args.gpu, max_price, filters))
+        if not offers:
+            print(f"No {args.gpu} offers under ${max_price:.2f}/hr. Cheapest above the cap:")
+            over = vast_api.search_offers(
+                api_key, vast_api.build_offer_query(args.gpu, None, filters))
+            for o in sorted(over, key=lambda o: o.get("dph_total", float("inf")))[:3]:
+                print(f"  {vast_api.format_offer(o)}")
+            return 1
+        offers = sorted(offers, key=lambda o: o.get("dph_total", float("inf")))[:max(1, args.list)]
+        if args.yes:
+            offer = offers[0]
+            print(f"{vast_api.format_offer(offer)} · offer {offer.get('id', '?')}")
+        else:
+            offer = choose_offer(offers)
+            if offer is None:
+                print("Nothing rented.")
+                return 0
     # Computed once, before renting, so a `dph_total`-less offer never loses
     # the instance id to a KeyError after a successful (billing) rent.
     dph = offer.get("dph_total", 0.0)
@@ -527,7 +562,9 @@ def build_parser() -> argparse.ArgumentParser:
     u = sub.add_parser("up", help="rent a Vast GPU, wait for READY, open the tunnel")
     u.add_argument("--gpu", choices=sorted(vast_api.GPU_FILTERS), default="5090")
     u.add_argument("--max-price", type=float, default=None, help="max $/hr (default per GPU)")
-    u.add_argument("--yes", action="store_true", help="skip the rent confirmation")
+    u.add_argument("--yes", action="store_true", help="skip the prompt and rent the cheapest offer")
+    u.add_argument("--list", type=int, default=5, help="how many offers to choose from (default 5)")
+    u.add_argument("--offer", type=int, default=None, help="rent this specific offer id directly")
     u.add_argument("--timeout", type=int, default=900)
     u.add_argument("--interval", type=float, default=30.0)
     u.set_defaults(fn=cmd_up)

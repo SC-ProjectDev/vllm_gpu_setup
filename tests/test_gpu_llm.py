@@ -508,11 +508,87 @@ def test_up_vast_error_401_prints_manage_keys_hint_no_traceback(up_env, monkeypa
 
 def test_up_decline_rents_nothing(up_env, monkeypatch, capsys):
     up_env["offers"] = [OFFER]
-    monkeypatch.setattr(gpu_llm, "confirm", lambda prompt: False)
+    monkeypatch.setattr("builtins.input", lambda prompt: "")   # Enter aborts the picker
     rc = gpu_llm.main(["up"])
     assert rc == 0
     assert up_env["rented"] == []
     assert "Nothing rented" in capsys.readouterr().out
+
+
+OFFER_B = {"id": 8, "dph_total": 0.45, "gpu_name": "RTX 5090",
+           "inet_down": 557.0, "reliability2": 0.995, "geolocation": "South Korea, KR"}
+OFFER_C = {"id": 9, "dph_total": 0.71, "gpu_name": "RTX 5090",
+           "inet_down": 1200.0, "reliability2": 0.99, "geolocation": "US, TX"}
+
+
+def test_up_picker_lists_offers_and_picks_choice(up_env, monkeypatch, capsys):
+    up_env["offers"] = [OFFER, OFFER_B, OFFER_C]          # 0.592, 0.45, 0.71
+    up_env["instances"] = [RUNNING]
+    monkeypatch.setattr("builtins.input", lambda prompt: "2")
+    rc = gpu_llm.main(["up"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "1. " in out and "2. " in out and "3. " in out
+    assert "offer 8" in out                                # ids shown for --offer reuse
+    assert up_env["rented"][0][0] == 7                     # sorted by price: #2 is 0.592 (id 7)
+
+
+def test_up_picker_invalid_choice_aborts(up_env, monkeypatch, capsys):
+    up_env["offers"] = [OFFER, OFFER_B]
+    monkeypatch.setattr("builtins.input", lambda prompt: "9")
+    rc = gpu_llm.main(["up"])
+    assert rc == 0
+    assert up_env["rented"] == []
+    assert "Nothing rented" in capsys.readouterr().out
+
+
+def test_up_yes_rents_cheapest_of_unsorted(up_env, capsys):
+    up_env["offers"] = [OFFER_C, OFFER, OFFER_B]           # unsorted; cheapest is id 8
+    up_env["instances"] = [RUNNING]
+    rc = gpu_llm.main(["up", "--yes"])
+    assert rc == 0
+    assert up_env["rented"][0][0] == 8
+
+
+def test_up_list_flag_limits_choices(up_env, monkeypatch, capsys):
+    up_env["offers"] = [OFFER, OFFER_B, OFFER_C]
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    gpu_llm.main(["up", "--list", "2"])
+    out = capsys.readouterr().out
+    assert "1. " in out and "2. " in out and "3. " not in out
+
+
+def test_up_offer_flag_rents_specific_id(up_env, capsys):
+    up_env["offers"] = [OFFER, OFFER_B]                    # uncapped lookup finds id 8
+    up_env["instances"] = [RUNNING]
+    rc = gpu_llm.main(["up", "--offer", "8", "--yes"])
+    assert rc == 0
+    assert up_env["rented"][0][0] == 8
+    assert gpu_llm.load_state()["dph"] == 0.45             # details from lookup
+    assert "dph_total" not in up_env["queries"][0]         # lookup search is uncapped
+
+
+def test_up_offer_flag_unknown_id_rents_with_zero_dph(up_env, capsys):
+    up_env["offers"] = []                                  # lookup finds nothing
+    up_env["instances"] = [RUNNING]
+    rc = gpu_llm.main(["up", "--offer", "99", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert up_env["rented"][0][0] == 99
+    assert gpu_llm.load_state()["dph"] == 0.0
+    assert "99" in out
+
+
+def test_up_filters_from_config(up_env, home, capsys):
+    (home / "config.toml").write_text(
+        '[filters]\ninet_down = 1000\ncountry = ["US", "CA"]\n')
+    up_env["offers"] = [OFFER]
+    up_env["instances"] = [RUNNING]
+    rc = gpu_llm.main(["up", "--yes"])
+    assert rc == 0
+    q = up_env["queries"][0]
+    assert q["inet_down"] == {"gte": 1000.0}
+    assert q["geolocation"] == {"in": ["US", "CA"]}
 
 
 def test_up_dead_on_arrival_asks_destroy(up_env, monkeypatch, capsys):

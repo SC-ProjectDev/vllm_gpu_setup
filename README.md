@@ -19,6 +19,13 @@ api_key = "..."          # Vast API key, from https://cloud.vast.ai/manage-keys/
                           # (or set the VAST_API_KEY env var instead)
 local_port = 8000
 # ssh_key = "C:/Users/you/.ssh/id_ed25519"   # optional
+
+# Optional stricter offer filters (defaults: inet_down 500, reliability 0.98,
+# any country):
+# [filters]
+# inet_down = 1000
+# reliability = 0.99
+# country = ["US", "CA"]
 # host / ssh_port only needed for the manual-rental fallback below —
 # `up`/`down`/`status` record these automatically once an instance is rented.
 ```
@@ -33,11 +40,13 @@ coder_model = "qwen"
 
 ## Daily loop
 
-1. `python desktop/gpu_llm.py up` — searches Vast for the cheapest offer
-   (`--gpu 5090` is the default; pick another with `--gpu`), shows the $/hr
-   offer, and asks to confirm before renting (`--yes` skips the prompt).
-   It rents, waits for the instance to come up, opens the tunnel, and prints
-   `vLLM is READY.` (5–10 min cold).
+1. `python desktop/gpu_llm.py up` — searches Vast (`--gpu 5090` is the
+   default) and shows the 5 cheapest matching offers, numbered, with $/hr,
+   Mbps, reliability, country, and offer id; pick one by number (Enter
+   aborts). `--yes` auto-rents the cheapest, `--list N` changes the count,
+   and `--offer <id>` rents a specific offer id straight from the console.
+   It then rents, waits for the instance to come up, opens the tunnel, and
+   prints `vLLM is READY.` (5–10 min cold).
 2. Use `llm-cli chat`, `llm-cli code`, `llm-cli agent` as usual.
 3. `python desktop/gpu_llm.py status` / `logs -f` when curious.
 4. `python desktop/gpu_llm.py down` — closes the tunnel **and destroys the

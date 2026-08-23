@@ -25,7 +25,10 @@ class VastError(Exception):
         self.code = code
 
 
-def build_offer_query(gpu: str, max_price: float | None) -> dict:
+def build_offer_query(gpu: str, max_price: float | None, filters: dict | None = None) -> dict:
+    """filters: optional [filters] table from config.toml — inet_down/reliability
+    raise the default floors; country (list of codes) adds a geolocation filter."""
+    f = filters or {}
     q = {
         "limit": 20,
         "type": "ondemand",
@@ -33,11 +36,13 @@ def build_offer_query(gpu: str, max_price: float | None) -> dict:
         "verified": {"eq": True},
         "num_gpus": {"eq": 1},
         "gpu_name": {"in": list(GPU_FILTERS[gpu]["gpu_names"])},
-        "reliability": {"gte": 0.98},
-        "inet_down": {"gte": 500},
+        "reliability": {"gte": float(f["reliability"]) if "reliability" in f else 0.98},
+        "inet_down": {"gte": float(f["inet_down"]) if "inet_down" in f else 500},
         "cuda_max_good": {"gte": 12.8},
         "order": [["dph_total", "asc"]],
     }
+    if f.get("country"):
+        q["geolocation"] = {"in": [str(c) for c in f["country"]]}
     if max_price is not None:
         q["dph_total"] = {"lte": max_price}
     return q

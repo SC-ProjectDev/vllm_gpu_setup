@@ -38,6 +38,24 @@ def test_build_offer_query_none_cap_omits_price():
     assert "dph_total" not in q
 
 
+def test_build_offer_query_filters_override_floors():
+    q = build_offer_query("5090", 1.0, {"inet_down": 1000, "reliability": 0.99})
+    assert q["inet_down"] == {"gte": 1000.0}
+    assert q["reliability"] == {"gte": 0.99}
+
+
+def test_build_offer_query_country_filter():
+    q = build_offer_query("5090", 1.0, {"country": ["US", "CA"]})
+    assert q["geolocation"] == {"in": ["US", "CA"]}
+    assert "geolocation" not in build_offer_query("5090", 1.0)
+
+
+def test_build_offer_query_empty_filters_keeps_defaults():
+    q = build_offer_query("5090", 1.0, {})
+    assert q["inet_down"] == {"gte": 500}
+    assert q["reliability"] == {"gte": 0.98}
+
+
 def test_build_offer_query_unknown_gpu_raises():
     with pytest.raises(KeyError):
         build_offer_query("3090", 1.0)
