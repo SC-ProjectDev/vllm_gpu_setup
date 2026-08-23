@@ -324,3 +324,50 @@ def test_logs_follow_passes_dash_f(home, monkeypatch, capfd):
     assert rc == 0
     out = capfd.readouterr().out
     assert "tail -f -n 100 /var/log/vllm.log" in out
+
+
+def test_resolve_api_key_env_beats_config(home, monkeypatch):
+    monkeypatch.setenv("VAST_API_KEY", "ENVKEY")
+    assert gpu_llm.resolve_api_key({"api_key": "CFGKEY"}) == "ENVKEY"
+    monkeypatch.delenv("VAST_API_KEY")
+    assert gpu_llm.resolve_api_key({"api_key": "CFGKEY"}) == "CFGKEY"
+    assert gpu_llm.resolve_api_key({}) is None
+
+
+def test_resolve_max_price_precedence():
+    cfg = {"max_price": {"5090": 0.8}}
+    assert gpu_llm.resolve_max_price(cfg, "5090", 0.7) == 0.7
+    assert gpu_llm.resolve_max_price(cfg, "5090", None) == 0.8
+    assert gpu_llm.resolve_max_price({}, "5090", None) == 1.00
+    assert gpu_llm.resolve_max_price({}, "h200", None) == 3.50
+
+
+def test_merge_state_preserves_existing_fields(home):
+    gpu_llm.save_state({"instance_id": 42, "gpu": "5090", "dph": 0.59})
+    gpu_llm.merge_state({"pid": 123, "host": "h"})
+    st = gpu_llm.load_state()
+    assert st["instance_id"] == 42 and st["pid"] == 123 and st["host"] == "h"
+
+
+def test_resolve_conn_falls_back_to_state(home):
+    gpu_llm.save_state({"instance_id": 42, "host": "9.9.9.9", "ssh_port": 1234, "pid": 0})
+    args = type("A", (), {"host": None, "port": None, "local": None})()
+    cfg = gpu_llm.resolve_conn(args)
+    assert cfg["host"] == "9.9.9.9" and cfg["ssh_port"] == 1234
+
+
+def test_resolve_conn_config_beats_state(home):
+    (home / "config.toml").write_text('host = "1.2.3.4"\nssh_port = 22\n')
+    gpu_llm.save_state({"host": "9.9.9.9", "ssh_port": 1234, "pid": 0})
+    args = type("A", (), {"host": None, "port": None, "local": None})()
+    assert gpu_llm.resolve_conn(args)["host"] == "1.2.3.4"
+
+
+def test_status_shows_instance_line(home, monkeypatch, capsys):
+    monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "gpu-line"))
+    gpu_llm.save_state({"pid": os.getpid(), "host": "h", "ssh_port": 22,
+                       "local_port": 8000, "image": "python",
+                       "instance_id": 4242, "dph": 0.592})
+    gpu_llm.main(["status"])
+    out = capsys.readouterr().out
+    assert "instance: 4242 ($0.592/hr)" in out

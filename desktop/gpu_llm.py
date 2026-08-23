@@ -15,6 +15,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+try:
+    from desktop import vast_api
+except ImportError:  # run as `python desktop/gpu_llm.py` from repo root
+    import vast_api
+
 DEFAULT_LOCAL_PORT = 8000
 REMOTE_PORT = 8000
 STATUS_FILE = "/var/log/vllm.status"
@@ -58,6 +63,23 @@ def clear_state() -> None:
     f = _state_file()
     if f.exists():
         f.unlink()
+
+
+def merge_state(fields: dict) -> None:
+    save_state({**(load_state() or {}), **fields})
+
+
+def resolve_api_key(cfg: dict) -> str | None:
+    return os.environ.get("VAST_API_KEY") or cfg.get("api_key")
+
+
+def resolve_max_price(cfg: dict, gpu: str, cli_value: float | None) -> float:
+    if cli_value is not None:
+        return cli_value
+    from_cfg = (cfg.get("max_price") or {}).get(gpu)
+    if from_cfg is not None:
+        return float(from_cfg)
+    return vast_api.GPU_FILTERS[gpu]["max_price"]
 
 
 def pid_alive(pid: int, image: str | None = None) -> bool:
@@ -187,6 +209,11 @@ def resolve_conn(args) -> dict:
     if getattr(args, "local", None):
         cfg["local_port"] = args.local
     if not cfg.get("host") or not cfg.get("ssh_port"):
+        st = load_state()
+        if st and st.get("host") and st.get("ssh_port"):
+            cfg.setdefault("host", st["host"])
+            cfg.setdefault("ssh_port", st["ssh_port"])
+    if not cfg.get("host") or not cfg.get("ssh_port"):
         raise SystemExit("host and ssh port required: pass --host/--port or set them in "
                          f"{home() / 'config.toml'}")
     return cfg
@@ -237,17 +264,11 @@ def wait_ready(cfg: dict, local_port: int, timeout: float, interval: float, prog
     return False, "timeout"
 
 
-def cmd_tunnel(args) -> int:
-    cfg = resolve_conn(args)
+def open_tunnel_and_wait(cfg: dict, timeout: int, interval: float) -> int:
     local_port = int(cfg["local_port"])
-    old = load_state()
-    if old and pid_alive(old["pid"], old.get("image")):
-        print(f"Tunnel already running (pid {old['pid']}); run `down` first.")
-        return 1
     cmd = tunnel_cmd(cfg, local_port)
     creation = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-    ssh_log = ssh_log_path()
-    ssh_log_f = ssh_log.open("w", encoding="utf-8")
+    ssh_log_f = ssh_log_path().open("w", encoding="utf-8")
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=ssh_log_f, creationflags=creation)
     finally:
@@ -258,11 +279,10 @@ def cmd_tunnel(args) -> int:
         print(f"ssh exited with code {proc.returncode} immediately; check host/port/key.")
         print_ssh_log_tail()
         return 1
-    image = Path(ssh_bin()).name
-    save_state({"pid": proc.pid, "host": cfg["host"], "ssh_port": int(cfg["ssh_port"]), "local_port": local_port,
-                "image": image})
+    merge_state({"pid": proc.pid, "host": cfg["host"], "ssh_port": int(cfg["ssh_port"]),
+                 "local_port": local_port, "image": Path(ssh_bin()).name})
     print(f"Tunnel pid {proc.pid}: 127.0.0.1:{local_port} -> {cfg['host']}:{REMOTE_PORT}. Waiting for vLLM...")
-    ok, why = wait_ready(cfg, local_port, timeout=args.timeout, interval=args.interval, proc=proc)
+    ok, why = wait_ready(cfg, local_port, timeout=timeout, interval=interval, proc=proc)
     if not ok:
         print(f"Not ready: {why}")
         if why.startswith("ssh exited"):
@@ -272,13 +292,26 @@ def cmd_tunnel(args) -> int:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
-        clear_state()
+        st = load_state() or {}
+        if st.get("instance_id"):
+            merge_state({"pid": 0})
+        else:
+            clear_state()
         return 1
     _spawned.append(proc)
     print("vLLM is READY.\n")
     print(f"LLM_BASE_URL=http://127.0.0.1:{local_port}")
     print("LLM_MODEL=qwen")
     return 0
+
+
+def cmd_tunnel(args) -> int:
+    cfg = resolve_conn(args)
+    old = load_state()
+    if old and pid_alive(old["pid"], old.get("image")):
+        print(f"Tunnel already running (pid {old['pid']}); run `down` first.")
+        return 1
+    return open_tunnel_and_wait(cfg, args.timeout, args.interval)
 
 
 def state_cfg(st: dict) -> dict:
@@ -297,6 +330,8 @@ def cmd_status(args) -> int:
         print("tunnel: down")
         return 1
     print(f"tunnel: up (pid {st['pid']}) 127.0.0.1:{st['local_port']} -> {st['host']}:{REMOTE_PORT}")
+    if st.get("instance_id"):
+        print(f"instance: {st['instance_id']} (${st.get('dph', 0):.3f}/hr)")
     code, body = http_get(f"http://127.0.0.1:{st['local_port']}/v1/models", timeout=3.0)
     if code == 200:
         try:
