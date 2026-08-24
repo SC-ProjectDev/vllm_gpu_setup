@@ -140,18 +140,22 @@ Budget ~1 hour of rental. Record the values in the table at the end.
 | Max stable max_model_len | 49152 (READY, health + completion verified) |
 | Cost of run | $0.592/hr (≈$0.60 for the ~1 h acceptance run) |
 
-## Milestone 2 acceptance run (paid, ~30 min)
+## Milestone 2 acceptance run — PASSED 2026-08-23
 
-- [ ] `python desktop/gpu_llm.py up` — offer shown with $/hr, confirm, READY,
-      `llm-cli health` + `chat` work.
-- [ ] `python desktop/gpu_llm.py status` shows `instance: <id> ($/hr)`.
-- [ ] `python desktop/gpu_llm.py down` — instance destroyed; verify gone in
-      the console.
-- [ ] `python desktop/gpu_llm.py up --yes --max-price 0.05` exits 1 with the
-      over-cap listing; rents nothing.
-- [ ] Verify `GPU_FILTERS` gpu_name spellings against the live offers seen
-      above; fix the table if Vast spells any differently.
-- [ ] Record: time from `up` to READY, total cost.
+- [x] `python desktop/gpu_llm.py up` — picker shown (US/CA + 1 Gbps filters
+      applied), rented instance 48505562 at $0.396/hr, READY; `llm-cli
+      health`/`models`/`chat` all worked through the tunnel.
+- [x] `python desktop/gpu_llm.py status` showed `instance: 48505562
+      ($0.396/hr)` plus tunnel/model/GPU lines.
+- [x] `python desktop/gpu_llm.py down` — printed `instance 48505562
+      destroyed.`; verified gone via `GET /api/v1/instances` (empty) and
+      state.json cleared.
+- [x] `up --yes --max-price 0.05` exited 1 with the 3 cheapest over-cap
+      offers; rented nothing.
+- [x] `GPU_FILTERS` spelling confirmed live: `RTX 5090` matched real offers.
+- [x] Session metrics: ~9 tok/s single-stream generation during agent
+      coding, 29.5 GB VRAM, 17% GPU util / 139 W. Cost: $0.396/hr (billed
+      total in the Vast console).
 
 ## Deferred (milestone 3)
 
