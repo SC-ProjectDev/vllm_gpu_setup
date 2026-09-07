@@ -93,6 +93,7 @@ so you still need to **destroy the instance in the Vast console** yourself.
 | `scripts/serve.sh <gpu> <model>` | optional `hf buckets sync`, launch vLLM with `--api-key`, manage `/var/log/vllm.status` |
 | `scripts/health.sh` | `/health` + `/v1/models` (bearer `VLLM_API_KEY`) |
 | `scripts/smoke.sh` | one thinking-mode completion against `local`; prints tok/s |
+| `desktop/shim.py` | (desktop) strips JetBrains' h2c upgrade headers on `local_port`, forwards to the tunnel on `local_port + 10000` |
 
 Status file values: `STARTING`, `READY`, `FAILED: <reason>`.
 Bootstrap exit codes: 2 unknown GPU / model / no default, 3 `HF_TOKEN`
@@ -179,32 +180,45 @@ Budget ~1 hour of rental. Record the values in the table at the end.
       coding, 29.5 GB VRAM, 17% GPU util / 139 W. Cost: $0.396/hr (billed
       total in the Vast console).
 
-## Using the model from JetBrains Rider
+## Using the model from JetBrains IDEs (Rider, PyCharm, …)
 
-Rider's AI Assistant accepts OpenAI-compatible endpoints, which is exactly
-what vLLM exposes through the tunnel. With `up` (or `tunnel`) showing READY:
+AI Assistant accepts OpenAI-compatible endpoints, which is what vLLM
+exposes through the tunnel. Verified in PyCharm 2026.2 on 2026-09-07; the
+settings are identical in Rider. With `up` (or `tunnel`) showing READY:
 
 1. **Settings | Tools | AI Assistant | Providers & API keys** → *Third-party
    AI providers* → **OpenAI Compatible**.
-   - URL: `http://127.0.0.1:8000/v1` (if *Test Connection* fails, try
-     `http://127.0.0.1:8000` — the docs don't say which form it wants).
+   - URL: `http://127.0.0.1:8000/v1` (this form passed *Test Connection*).
    - API key: the `LLM_API_KEY` value from the banner. The field is
-     mandatory in Rider and vLLM enforces it on `/v1/*`.
+     mandatory in the IDE and vLLM enforces it on `/v1/*`.
    - *Tool calling*: on (every profile passes vLLM's tool-call parser).
    - *Test Connection*, then *Apply*.
 2. **Models Assignment**: set *Core features* to `local`. Set the model
-   **context window to `LLM_CONTEXT`** from the banner — Rider's default
+   **context window to `LLM_CONTEXT`** from the banner — the IDE default
    is 64K, which is larger than the 5090 profile's 32K and will error.
    *Instant helpers* can also be `local`.
 3. Skip the **AI Completion** section (inline completion). A 27B thinking
    model is slow and poorly suited to fill-in-the-middle; leave it on the
    JetBrains default or off.
-4. Reasoning comes back as `reasoning_content`, which Rider ignores; only
+4. Reasoning comes back as `reasoning_content`, which the IDE ignores; only
    the final answer shows. Thinking still costs tokens and latency.
+5. The custom provider appears in **chat mode only**. AI Assistant's agent
+   mode and Junie do not offer OpenAI-compatible providers (JetBrains
+   LLM-24277 / LLM-22660); use `llm-cli agent` or your own harness for that.
 
-Known unknowns for the acceptance run: the exact URL form, and whether
-AI Assistant's agent mode (MCP tools) works with a custom provider — the
-docs say MCP tools are unsupported "with local models".
+### Why there is a shim on port 8000
+
+The IDE's Ktor HTTP client sends `Connection: Upgrade, HTTP2-Settings` and
+`Upgrade: h2c` on every request. vLLM's uvicorn does not upgrade and, on such
+a request, hands the app an **empty body**, so chat fails with
+`400 … {'loc': ('body',), 'msg': 'Field required'}` while `GET /v1/models`
+works (found 2026-09-07 with a logging proxy; JetBrains tracks the vLLM
+symptom as LLM-28284). So `gpu-llm` runs `desktop/shim.py` on `local_port`
+(8000): it strips those three headers and forwards everything else
+byte-for-byte, streaming included. The ssh tunnel itself binds
+`local_port + 10000` (18000) — `status` shows both. llm-cli, curl, and
+`/metrics` scrapes go through the shim unchanged; hit 18000 only if you
+want to bypass it.
 
 **Junie**: the IDE plugin has no custom-model setting. The Junie CLI does,
 via a JSON profile (`$JUNIE_HOME/models/local.json` or `.junie/models/`):
@@ -243,8 +257,11 @@ profiles and the 5090 regression are still to be exercised (below).
       token** from the instance (`hf` 1.27.0 in the image); config carries a
       standard `quant_method: fp8` block on `Qwen3_5ForConditionalGeneration`.
       Full sync not yet timed.
-- [ ] Rider: *Test Connection* URL form; chat with `local`; tool-calling
-      toggle; agent mode. (Needs the IDE settings UI.)
+- [x] JetBrains IDE (PyCharm 2026.2, same plugin as Rider): *Test Connection*
+      passed with `http://127.0.0.1:8000/v1`; chat first failed with
+      `400 body: Field required` (h2c upgrade headers → empty body in
+      uvicorn), passed through the header-stripping shim, now built into
+      `up`/`tunnel`. Provider is offered in chat mode only, not agent mode.
 - [ ] gpt-oss-120b on A100; modded-fp8 full sync + READY; 5090 regression.
 - [ ] `down` destroys the instance (left up after this run for the Rider test).
 
@@ -263,8 +280,8 @@ cp1252 default.
 | 5090 time to READY (regression) | |
 | gpt-oss-120b on A100: time to READY / tok/s / peak VRAM | |
 | modded-fp8 bucket sync time | |
-| Rider URL form that passed Test Connection | |
-| Rider agent mode with `local` | |
+| IDE URL form that passed Test Connection | `http://127.0.0.1:8000/v1` (PyCharm 2026.2) |
+| IDE agent mode with `local` | not offered for OpenAI-compatible providers; chat works via the shim |
 
 ## Deferred (milestone 4)
 

@@ -92,7 +92,21 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
-def _health_server(ok_after: int):
+def _free_port() -> int:
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _tunnel_ports(ok_after: int):
+    """(local_port, fake-vLLM server): the fake listens on shim.raw_port(local_port),
+    i.e. where the ssh tunnel would be, so requests to local_port go through the shim."""
+    local = _free_port()
+    return local, _health_server(ok_after, port=gpu_llm.shim.raw_port(local))
+
+
+def _health_server(ok_after: int, port: int = 0):
     """HTTP server whose /health returns 503 for the first `ok_after` hits, then 200."""
     hits = {"n": 0}
 
@@ -111,7 +125,7 @@ def _health_server(ok_after: int):
         def log_message(self, *a):
             pass
 
-    srv = HTTPServer(("127.0.0.1", 0), H)
+    srv = HTTPServer(("127.0.0.1", port), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -210,54 +224,72 @@ def test_wait_ready_times_out(home, monkeypatch):
 
 
 def test_cmd_tunnel_spawns_ssh_saves_state_and_prints_env(home, monkeypatch, capsys):
-    srv = _health_server(ok_after=0)
+    local, srv = _tunnel_ports(ok_after=0)
     monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "READY"))
     try:
         rc = gpu_llm.main(["tunnel", "--host", "1.2.3.4", "--port", "2222",
-                           "--local", str(srv.server_port), "--timeout", "20", "--interval", "0.2"])
+                           "--local", str(local), "--timeout", "20", "--interval", "0.2"])
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        st = gpu_llm.load_state()
+        assert st["host"] == "1.2.3.4" and st["ssh_port"] == 2222 and st["local_port"] == local
+        assert st["tunnel_port"] == gpu_llm.shim.raw_port(local)
+        assert gpu_llm.pid_alive(st["pid"])
+        assert gpu_llm.pid_alive(st["shim_pid"], st["shim_image"])
+        assert f"LLM_BASE_URL=http://127.0.0.1:{local}" in out
+        assert "LLM_MODEL=local" in out
+        assert "LLM_API_KEY=" in out
+        # The banner URL is the shim: a JetBrains-style h2c upgrade request must reach vLLM intact.
+        import json, urllib.request
+        req = urllib.request.Request(f"http://127.0.0.1:{local}/v1/models", headers={
+            "Connection": "Upgrade, HTTP2-Settings", "Upgrade": "h2c", "HTTP2-Settings": "AAEA"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert json.loads(r.read())["data"][0]["id"] == "local"
+        shim_pid = st["shim_pid"]
+        rc = gpu_llm.main(["down"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert f"Shim pid {shim_pid} stopped." in out
+        time.sleep(0.5)
+        assert not gpu_llm.pid_alive(shim_pid, st["shim_image"])
     finally:
         _stop(srv)
-    out = capsys.readouterr().out
-    assert rc == 0, out
-    st = gpu_llm.load_state()
-    assert st["host"] == "1.2.3.4" and st["ssh_port"] == 2222 and st["local_port"] == srv.server_port
-    assert gpu_llm.pid_alive(st["pid"])
-    assert f"LLM_BASE_URL=http://127.0.0.1:{srv.server_port}" in out
-    assert "LLM_MODEL=local" in out
-    assert "LLM_API_KEY=" in out
-    gpu_llm.main(["down"])
 
 
 def test_cmd_tunnel_failure_kills_ssh_and_returns_1(home, monkeypatch, capsys):
-    srv = _health_server(ok_after=10_000)
+    local, srv = _tunnel_ports(ok_after=10_000)
     monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "FAILED: vllm 0.16 < 0.17"))
     try:
         rc = gpu_llm.main(["tunnel", "--host", "h", "--port", "22",
-                           "--local", str(srv.server_port), "--timeout", "20", "--interval", "0.2"])
+                           "--local", str(local), "--timeout", "20", "--interval", "0.2"])
     finally:
         _stop(srv)
     assert rc == 1
     assert gpu_llm.load_state() is None
     assert "FAILED: vllm 0.16 < 0.17" in capsys.readouterr().out
+    time.sleep(0.5)
+    import urllib.error, urllib.request
+    with pytest.raises(urllib.error.URLError):          # shim was killed too: port is closed
+        urllib.request.urlopen(f"http://127.0.0.1:{local}/health", timeout=2)
 
 
 def test_tunnel_failure_preserves_instance_id_when_present(home, monkeypatch, capsys):
     # A failed tunnel must merge_state({"pid": 0}) -- not clear_state -- when
     # state holds a billing instance_id, so `down`/`status` can still find it.
-    srv = _health_server(ok_after=10_000)
+    local, srv = _tunnel_ports(ok_after=10_000)
     monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "FAILED: vllm 0.16 < 0.17"))
     gpu_llm.save_state({"pid": 0, "instance_id": 4242, "host": "h", "ssh_port": 22,
                         "gpu": "5090", "dph": 0.592})
     try:
         rc = gpu_llm.main(["tunnel", "--host", "h", "--port", "22",
-                           "--local", str(srv.server_port), "--timeout", "20", "--interval", "0.2"])
+                           "--local", str(local), "--timeout", "20", "--interval", "0.2"])
     finally:
         _stop(srv)
     assert rc == 1
     st = gpu_llm.load_state()
     assert st is not None
     assert st["instance_id"] == 4242
-    assert st["pid"] == 0
+    assert st["pid"] == 0 and st["shim_pid"] == 0
 
 
 # The "no instance_id -> clear_state" side of this invariant is already
@@ -266,12 +298,12 @@ def test_tunnel_failure_preserves_instance_id_when_present(home, monkeypatch, ca
 
 
 def test_cmd_tunnel_ssh_dying_mid_wait_returns_1_fast(home, monkeypatch, capsys):
-    srv = _health_server(ok_after=10_000)  # never becomes healthy on its own
+    local, srv = _tunnel_ports(ok_after=10_000)  # never becomes healthy on its own
     monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "STARTING", tunnel_exit=7))
     start = time.monotonic()
     try:
         rc = gpu_llm.main(["tunnel", "--host", "h", "--port", "22",
-                           "--local", str(srv.server_port), "--timeout", "20", "--interval", "0.2"])
+                           "--local", str(local), "--timeout", "20", "--interval", "0.2"])
     finally:
         _stop(srv)
     elapsed = time.monotonic() - start

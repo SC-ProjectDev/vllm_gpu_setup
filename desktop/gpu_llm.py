@@ -18,8 +18,9 @@ import urllib.request
 from pathlib import Path
 
 try:
-    from desktop import vast_api
+    from desktop import shim, vast_api
 except ImportError:  # run as `python desktop/gpu_llm.py` from repo root
+    import shim
     import vast_api
 
 DEFAULT_LOCAL_PORT = 8000
@@ -275,18 +276,20 @@ def cmd_down(args) -> int:
     if not st:
         print("No tunnel recorded (nothing to do).")
         return 0
-    if st.get("pid") and pid_alive(st["pid"], st.get("image")):
-        kill_pid(st["pid"])
-        print(f"Tunnel pid {st['pid']} stopped.")
-    elif st.get("pid"):
-        print(f"Tunnel pid {st['pid']} was already gone.")
+    for pid_key, image_key, label in (("pid", "image", "Tunnel"), ("shim_pid", "shim_image", "Shim")):
+        pid = st.get(pid_key)
+        if pid and pid_alive(pid, st.get(image_key)):
+            kill_pid(pid)
+            print(f"{label} pid {pid} stopped.")
+        elif pid:
+            print(f"{label} pid {pid} was already gone.")
     iid = st.get("instance_id")
     if not iid:
         clear_state()
         print("Reminder: the Vast instance is still billing — destroy it in the Vast console.")
         return 0
     if getattr(args, "keep", False):
-        merge_state({"pid": 0})
+        merge_state({"pid": 0, "shim_pid": 0})
         print(f"instance {iid} kept (still billing); plain `down` destroys it later.")
         return 0
     api_key = resolve_api_key(load_config())
@@ -336,9 +339,37 @@ def wait_ready(cfg: dict, local_port: int, timeout: float, interval: float, prog
     return False, "timeout"
 
 
+def shim_log_path() -> Path:
+    return home() / "shim.log"
+
+
+def spawn_shim(local_port: int, tunnel_port: int) -> subprocess.Popen:
+    """Start desktop/shim.py: clients -> 127.0.0.1:local_port -> tunnel at tunnel_port.
+    It strips the h2c upgrade headers JetBrains IDEs send (vLLM drops the body otherwise)."""
+    cmd = [sys.executable, str(REPO_ROOT / "desktop" / "shim.py"),
+           "--listen", str(local_port), "--target", str(tunnel_port)]
+    creation = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    log_f = shim_log_path().open("w", encoding="utf-8")
+    try:
+        return subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT, creationflags=creation)
+    finally:
+        log_f.close()
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    kill_pid(proc.pid)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def open_tunnel_and_wait(cfg: dict, timeout: int, interval: float) -> int:
+    """ssh -L on the raw port, the shim on local_port in front of it, then wait for
+    /health through the shim so the banner URL is what got verified."""
     local_port = int(cfg["local_port"])
-    cmd = tunnel_cmd(cfg, local_port)
+    tunnel_port = shim.raw_port(local_port)
+    cmd = tunnel_cmd(cfg, tunnel_port)
     creation = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
     ssh_log_f = ssh_log_path().open("w", encoding="utf-8")
     try:
@@ -351,26 +382,32 @@ def open_tunnel_and_wait(cfg: dict, timeout: int, interval: float) -> int:
         print(f"ssh exited with code {proc.returncode} immediately; check host/port/key.")
         print_ssh_log_tail()
         return 1
+    shim_proc = spawn_shim(local_port, tunnel_port)
+    time.sleep(0.5)
+    if shim_proc.poll() is not None:
+        print(f"shim exited with code {shim_proc.returncode} immediately (is 127.0.0.1:{local_port} in use?); "
+              f"see {shim_log_path()}")
+        _stop(proc)
+        return 1
     merge_state({"pid": proc.pid, "host": cfg["host"], "ssh_port": int(cfg["ssh_port"]),
-                 "local_port": local_port, "image": Path(ssh_bin()).name})
-    print(f"Tunnel pid {proc.pid}: 127.0.0.1:{local_port} -> {cfg['host']}:{REMOTE_PORT}. Waiting for vLLM...")
+                 "local_port": local_port, "tunnel_port": tunnel_port, "image": Path(ssh_bin()).name,
+                 "shim_pid": shim_proc.pid, "shim_image": Path(sys.executable).name})
+    print(f"Tunnel pid {proc.pid}: 127.0.0.1:{tunnel_port} -> {cfg['host']}:{REMOTE_PORT}; "
+          f"shim pid {shim_proc.pid}: 127.0.0.1:{local_port} -> 127.0.0.1:{tunnel_port}. Waiting for vLLM...")
     ok, why = wait_ready(cfg, local_port, timeout=timeout, interval=interval, proc=proc)
     if not ok:
         print(f"Not ready: {why}")
         if why.startswith("ssh exited"):
             print_ssh_log_tail()
-        kill_pid(proc.pid)
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
+        _stop(proc)
+        _stop(shim_proc)
         st = load_state() or {}
         if st.get("instance_id"):
-            merge_state({"pid": 0})
+            merge_state({"pid": 0, "shim_pid": 0})
         else:
             clear_state()
         return 1
-    _spawned.append(proc)
+    _spawned.extend((proc, shim_proc))
     print("vLLM is READY.\n")
     print_client_settings(local_port)
     return 0
@@ -636,7 +673,13 @@ def cmd_status(args) -> int:
     if not st or not pid_alive(st.get("pid"), st.get("image")):
         print("tunnel: down")
         return 1
-    print(f"tunnel: up (pid {st['pid']}) 127.0.0.1:{st.get('local_port')} -> {st.get('host')}:{REMOTE_PORT}")
+    tunnel_port = st.get("tunnel_port", st.get("local_port"))
+    print(f"tunnel: up (pid {st['pid']}) 127.0.0.1:{tunnel_port} -> {st.get('host')}:{REMOTE_PORT}")
+    if st.get("shim_pid"):
+        if pid_alive(st["shim_pid"], st.get("shim_image")):
+            print(f"shim: up (pid {st['shim_pid']}) 127.0.0.1:{st.get('local_port')} -> 127.0.0.1:{tunnel_port}")
+        else:
+            print(f"shim: down (pid {st['shim_pid']} gone) — IDE clients will fail; run `down` then `tunnel`")
     key = resolve_llm_api_key(load_config())
     code, body = http_get(f"http://127.0.0.1:{st['local_port']}/v1/models", timeout=3.0,
                           headers={"Authorization": f"Bearer {key}"})
