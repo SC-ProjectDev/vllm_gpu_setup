@@ -861,3 +861,21 @@ def test_up_offer_flag_falls_back_to_unfiltered_lookup(up_env, monkeypatch, home
     assert rc == 0
     assert gpu_llm.load_state()["dph"] == 0.45
     assert "geolocation" in up_env["queries"][0] and "geolocation" not in up_env["queries"][1]
+
+
+def test_ssh_run_decodes_utf8_and_tolerates_bad_bytes(home, monkeypatch):
+    # vLLM's log lines carry UTF-8 box-drawing chars; a stray invalid byte must
+    # not raise inside subprocess (seen live 2026-09-07: cp1252 decode error
+    # dropped the whole progress report).
+    script = home / "fake_ssh_bytes.py"
+    script.write_text("import sys\nsys.stdout.buffer.write(b'READY \\xe2\\x94\\x81 \\x81 end\\n')\n")
+    if sys.platform == "win32":
+        launcher = home / "fake_ssh_bytes.bat"
+        launcher.write_text(f'@"{sys.executable}" "{script}" %*\n')
+    else:
+        launcher = home / "fake_ssh_bytes"
+        launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
+        launcher.chmod(0o755)
+    monkeypatch.setenv("GPU_LLM_SSH", str(launcher))
+    out = gpu_llm.ssh_run({"host": "h", "ssh_port": 22}, "cat x")
+    assert out.startswith("READY ━ ") and out.endswith("end")

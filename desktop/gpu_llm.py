@@ -223,7 +223,11 @@ def print_ssh_log_tail(n: int = 10) -> None:
 
 def ssh_run(cfg: dict, remote_cmd: str, timeout: int = 20) -> str:
     try:
-        r = subprocess.run(ssh_base(cfg) + [remote_cmd], capture_output=True, text=True, timeout=timeout)
+        # The remote side is Linux/UTF-8 (vLLM logs carry box-drawing progress
+        # bars); Windows' default cp1252 decode raised inside subprocess's
+        # reader thread and silently dropped the whole output.
+        r = subprocess.run(ssh_base(cfg) + [remote_cmd], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
         if r.returncode != 0:
             return f"(ssh failed rc={r.returncode}) {(r.stderr or r.stdout).strip()}"
         return (r.stdout or r.stderr).strip()
