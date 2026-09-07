@@ -1,4 +1,4 @@
-"""Flat-YAML profile loader and vllm serve argv builder. Stdlib only."""
+"""Flat-YAML profile loader, vllm serve argv builder, and profiles/<gpu>/ catalog. Stdlib only."""
 from __future__ import annotations
 
 import os
@@ -60,7 +60,7 @@ def profile_to_argv(profile: dict, overrides: dict[str, str]) -> list[str]:
         max_len = int(overrides["max_model_len"])
     argv = [
         str(profile["model"]),
-        "--served-model-name", str(profile["served_model_name"]),
+        "--served-model-name", "local", str(profile["served_model_name"]),
         "--max-model-len", str(max_len),
         "--gpu-memory-utilization", str(profile["gpu_memory_utilization"]),
         "--kv-cache-dtype", str(profile["kv_cache_dtype"]),
@@ -71,6 +71,36 @@ def profile_to_argv(profile: dict, overrides: dict[str, str]) -> list[str]:
     for extra in profile.get("extra_args", []):
         argv.extend(extra.split())
     return argv
+
+
+MODEL_KEYS = ("quant", "size_gb", "max_model_len", "disk_gb", "model")
+
+
+def list_models(profiles_root: str | Path, gpu: str) -> list[dict]:
+    """Catalog entries for one `profiles/<gpu>/` dir: default first, then by id.
+
+    Each entry: id (file stem), default (bool) and the MODEL_KEYS values
+    (None when a profile omits one)."""
+    d = Path(profiles_root) / gpu
+    if not d.is_dir():
+        raise ValueError(f"no profiles for gpu {gpu!r} under {profiles_root}")
+    out = []
+    for f in sorted(d.glob("*.yaml")):
+        p = load_profile(f)
+        entry = {"id": f.stem, "default": p.get("default") is True}
+        for k in MODEL_KEYS:
+            entry[k] = p.get(k)
+        out.append(entry)
+    out.sort(key=lambda m: (not m["default"], m["id"]))
+    return out
+
+
+def default_model(profiles_root: str | Path, gpu: str) -> str:
+    """The single `default: true` model id for `gpu`; ValueError if not exactly one."""
+    defaults = [m["id"] for m in list_models(profiles_root, gpu) if m["default"]]
+    if len(defaults) != 1:
+        raise ValueError(f"expected exactly one default model for {gpu}, found {len(defaults)}")
+    return defaults[0]
 
 
 def main(argv: list[str]) -> int:

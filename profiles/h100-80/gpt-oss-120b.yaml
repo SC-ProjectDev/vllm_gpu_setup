@@ -1,0 +1,18 @@
+# 117B MoE / 5B active, native MXFP4 (~63 GB on disk). Harmony format: openai_gptoss /
+# openai tool parser. Fits one H100 80GB per the vLLM recipe; lower --gpu-memory-utilization
+# or MAX_MODEL_LEN if startup OOMs at 131K.
+model: openai/gpt-oss-120b
+served_model_name: gpt-oss-120b
+quant: MXFP4
+size_gb: 63
+disk_gb: 100
+max_model_len: 131072
+gpu_memory_utilization: 0.9
+kv_cache_dtype: auto
+enforce_eager: false
+tensor_parallel_size: 1
+requires_hf_token: false
+extra_args:
+  - --reasoning-parser openai_gptoss
+  - --enable-auto-tool-choice
+  - --tool-call-parser openai

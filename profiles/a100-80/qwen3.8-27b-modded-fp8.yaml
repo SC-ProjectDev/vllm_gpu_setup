@@ -1,0 +1,20 @@
+# Abliterated + block-FP8 Qwen3.8-27B (Apache 2.0) from a Hugging Face *bucket*, not a
+# model repo: serve.sh runs `hf buckets sync <download> <model>` before launching vLLM.
+# Its README passes --trust-remote-code; the FP8 quantization_config comes from config.json.
+model: /root/models/qwen3.8-27b-modded-fp8
+download: hf://buckets/Spectre001/Qwen3.8-27B-Modded-FP8-bucket
+served_model_name: qwen3.8-27b-modded-fp8
+quant: FP8
+size_gb: 31
+disk_gb: 60
+max_model_len: 262144
+gpu_memory_utilization: 0.92
+kv_cache_dtype: fp8
+enforce_eager: false
+tensor_parallel_size: 1
+requires_hf_token: false
+extra_args:
+  - --trust-remote-code
+  - --reasoning-parser qwen3
+  - --enable-auto-tool-choice
+  - --tool-call-parser qwen3_coder

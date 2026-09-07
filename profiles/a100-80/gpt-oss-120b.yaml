@@ -1,0 +1,18 @@
+# 117B MoE / 5B active, native MXFP4 (~63 GB on disk). Harmony format: openai_gptoss /
+# openai tool parser. Ampere: vLLM picks Triton attention + Marlin MXFP4 automatically.
+# ~17 GB left for KV on 80 GB, hence 64K ctx; raise via MAX_MODEL_LEN after checking nvidia-smi.
+model: openai/gpt-oss-120b
+served_model_name: gpt-oss-120b
+quant: MXFP4
+size_gb: 63
+disk_gb: 100
+max_model_len: 65536
+gpu_memory_utilization: 0.9
+kv_cache_dtype: auto
+enforce_eager: false
+tensor_parallel_size: 1
+requires_hf_token: false
+extra_args:
+  - --reasoning-parser openai_gptoss
+  - --enable-auto-tool-choice
+  - --tool-call-parser openai

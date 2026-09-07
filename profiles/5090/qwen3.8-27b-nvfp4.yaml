@@ -1,7 +1,12 @@
+# Single 32 GB card: --enforce-eager avoids CUDA-graph OOM; 32K ctx verified (49K stable).
 model: Inferact/Qwen3.8-27B-NVFP4
-served_model_name: qwen
+served_model_name: qwen3.8-27b-nvfp4
+quant: NVFP4
+size_gb: 17
+disk_gb: 60
+default: true
 max_model_len: 32768
-gpu_memory_utilization: 0.90
+gpu_memory_utilization: 0.9
 kv_cache_dtype: fp8
 enforce_eager: true
 tensor_parallel_size: 1

@@ -1,0 +1,17 @@
+# Official FP8. A100 has no FP8 tensor cores: vLLM runs it weight-only (Marlin); smaller,
+# not faster, than BF16 -- but leaves ~50 GB for KV cache.
+model: Qwen/Qwen3.8-27B-FP8
+served_model_name: qwen3.8-27b-fp8
+quant: FP8
+size_gb: 28
+disk_gb: 60
+max_model_len: 262144
+gpu_memory_utilization: 0.92
+kv_cache_dtype: fp8
+enforce_eager: false
+tensor_parallel_size: 1
+requires_hf_token: false
+extra_args:
+  - --reasoning-parser qwen3
+  - --enable-auto-tool-choice
+  - --tool-call-parser qwen3_coder

@@ -1,6 +1,11 @@
-model: Qwen/Qwen3.8-27B
-served_model_name: qwen
-max_model_len: 131072
+# Official FP8 with native FP8 tensor cores on Hopper; 262K native context.
+model: Qwen/Qwen3.8-27B-FP8
+served_model_name: qwen3.8-27b-fp8
+quant: FP8
+size_gb: 28
+disk_gb: 60
+default: true
+max_model_len: 262144
 gpu_memory_utilization: 0.92
 kv_cache_dtype: fp8
 enforce_eager: false

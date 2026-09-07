@@ -1,0 +1,17 @@
+# Full-precision Qwen3.8-27B (~56 GB): the largest variant that fits an 80 GB card.
+model: Qwen/Qwen3.8-27B
+served_model_name: qwen3.8-27b-bf16
+quant: BF16
+size_gb: 56
+disk_gb: 80
+default: true
+max_model_len: 262144
+gpu_memory_utilization: 0.92
+kv_cache_dtype: fp8
+enforce_eager: false
+tensor_parallel_size: 1
+requires_hf_token: false
+extra_args:
+  - --reasoning-parser qwen3
+  - --enable-auto-tool-choice
+  - --tool-call-parser qwen3_coder
