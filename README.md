@@ -220,33 +220,49 @@ via a JSON profile (`$JUNIE_HOME/models/local.json` or `.junie/models/`):
 }
 ```
 
-## Milestone 3 acceptance run
+## Milestone 3 acceptance run — A100 80GB PASSED 2026-09-07 (instance 50203301, Czechia, $0.951/hr)
 
-Budget ~1 h on a 5090, ~1.5 h on an A100 80GB. Push `main` first.
+Run with the default `qwen3.8-27b-bf16`; the gpt-oss-120b and modded-fp8
+profiles and the 5090 regression are still to be exercised (below).
 
-- [ ] 5090, default model: `up` → READY; banner shows `LLM_API_KEY` and
-      `LLM_CONTEXT=32768`; `llm-cli models` lists `local` and
-      `qwen3.8-27b-nvfp4`; `curl http://127.0.0.1:8000/v1/models` without a
-      bearer returns 401, with it returns 200.
-- [ ] `status` prints `model: qwen3.8-27b-nvfp4 (context 32768)`.
-- [ ] A100 80GB: `up --gpu a100-80 --model gpt-oss-120b` → READY within the
-      timeout (63 GB download); SSH in, `VLLM_API_KEY=<key> bash scripts/smoke.sh`
-      prints `reasoning: ok`; record tok/s and peak VRAM; try
-      `MAX_MODEL_LEN=131072` and note whether it stays READY.
-- [ ] A100 80GB: `up --gpu a100-80 --model qwen3.8-27b-modded-fp8` → log
-      shows `[serve] syncing hf://buckets/...`, READY; record sync time and
-      whether the bucket needed an `HF_TOKEN`.
-- [ ] Rider: *Test Connection* succeeds (record which URL form); chat with
-      `local` streams; tool-calling toggle behaviour recorded; agent mode
-      result recorded.
-- [ ] `down` destroys each instance; console shows none running.
+- [x] `up --gpu a100-80 --model qwen3.8-27b-bf16 --offer 46878740 --yes` →
+      READY in ~11 min cold (56 GB at ~1.9 Gbps; weights 3 min, torch.compile
+      84 s, engine init 205 s). Banner printed `LLM_API_KEY` and
+      `LLM_CONTEXT=131072`. Bootstrap log: `MODEL override=qwen3.8-27b-bf16`.
+- [x] `status`: `models: local, qwen3.8-27b-bf16` and
+      `model: qwen3.8-27b-bf16 (context 131072)`.
+- [x] `/v1/models`: no bearer → 401, wrong bearer → 401, banner key → 200;
+      `/health` open (200) as designed.
+- [x] `scripts/smoke.sh` through the tunnel: `reasoning: ok`.
+- [x] Tool calling: a `tools=[get_weather]` request returned
+      `finish_reason: tool_calls` with parsed arguments (qwen3_coder parser).
+- [x] `llm-cli health/models/chat --think/agent` via env overrides
+      (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL=local`): agent read two
+      files, fixed a bug, test passed.
+- [x] Spectre001 bucket: `hf buckets ls` + `cp config.json` succeed with **no
+      token** from the instance (`hf` 1.27.0 in the image); config carries a
+      standard `quant_method: fp8` block on `Qwen3_5ForConditionalGeneration`.
+      Full sync not yet timed.
+- [ ] Rider: *Test Connection* URL form; chat with `local`; tool-calling
+      toggle; agent mode. (Needs the IDE settings UI.)
+- [ ] gpt-oss-120b on A100; modded-fp8 full sync + READY; 5090 regression.
+- [ ] `down` destroys the instance (left up after this run for the Rider test).
+
+Two desktop bugs were found and fixed during this run: the a100-80 offer
+search matched 40 GB A100s (Vast names both "A100 SXM4"; now filtered by
+`gpu_ram`), and `ssh_run` crashed on UTF-8 progress bars under Windows'
+cp1252 default.
 
 | Metric | Value |
 |---|---|
+| A100 BF16 time to READY | ~11 min cold (rent 21:14 → READY 21:25 UTC) |
+| A100 BF16 tok/s, single stream | 17.6 (smoke, thinking on, 26 tok) / **27.7** (512 tok, thinking off) |
+| A100 BF16 VRAM | 51.1 GiB weights; 74.7 GB reserved at 0.92 util; KV cache 580K tokens (4.4× concurrency at 131K — 262K would fit) |
+| A100 idle draw | 59 W, 0 % util |
+| modded-fp8 bucket public? | yes (no HF_TOKEN needed) |
 | 5090 time to READY (regression) | |
 | gpt-oss-120b on A100: time to READY / tok/s / peak VRAM | |
-| gpt-oss-120b max stable `max_model_len` on A100 | |
-| modded-fp8 bucket sync time / token needed? | |
+| modded-fp8 bucket sync time | |
 | Rider URL form that passed Test Connection | |
 | Rider agent mode with `local` | |
 

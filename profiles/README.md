@@ -27,8 +27,10 @@ configured with, so it never changes) and its own id.
 | h200 | gpt-oss-120b | openai/gpt-oss-120b | MXFP4 | 63 | 131072 | 100 |
 
 Context lengths are starting points; `MAX_MODEL_LEN` in `.env` overrides
-without editing a profile. The 5090 value is acceptance-verified (49K also
-stable); the others are to be confirmed in the M3 acceptance run.
+without editing a profile. Verified: 5090 NVFP4 at 32K (49K also stable);
+a100-80 BF16 at 131K (2026-09-07: 580K-token KV cache, so 262K would fit
+too). The rest are to be confirmed live. The Spectre001 bucket is publicly
+readable without a token (checked from an instance with `hf` 1.27.0).
 
 ## Keys
 
