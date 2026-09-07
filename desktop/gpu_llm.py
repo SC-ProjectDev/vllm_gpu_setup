@@ -545,9 +545,15 @@ def _cmd_up_body(args, cfg: dict, api_key: str) -> int:
     if args.offer:
         # Rent a specific offer id (e.g. spotted in the Vast console). The
         # uncapped search is only a details lookup — renting proceeds either way.
-        found = [o for o in vast_api.search_offers(
-                     api_key, vast_api.build_offer_query(args.gpu, None, filters))
-                 if o.get("id") == args.offer]
+        # Retry without the config [filters] so an offer outside them still
+        # gets its price recorded.
+        found = []
+        for lookup_filters in (filters, {}):
+            found = [o for o in vast_api.search_offers(
+                         api_key, vast_api.build_offer_query(args.gpu, None, lookup_filters))
+                     if o.get("id") == args.offer]
+            if found or not filters:
+                break
         offer = found[0] if found else {"id": args.offer}
         if found:
             print(f"{vast_api.format_offer(offer)} · offer {offer['id']}")

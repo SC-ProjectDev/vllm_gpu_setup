@@ -844,3 +844,20 @@ def test_status_sends_bearer_and_reports_401(home, monkeypatch, capsys):
     assert seen["headers"] == {"Authorization": "Bearer k-1"}
     assert "models: unauthorized (check LLM_API_KEY)" in out
     assert "model: qwen3.8-27b-nvfp4 (context 32768)" in out
+
+
+def test_up_offer_flag_falls_back_to_unfiltered_lookup(up_env, monkeypatch, home):
+    # A country/bandwidth [filters] table must not hide the details (price!) of
+    # an offer rented explicitly by id from outside that filter.
+    (home / "config.toml").write_text('[filters]' + chr(10) + 'country = ["US"]' + chr(10))
+    up_env["instances"] = [RUNNING]
+
+    def search(k, q):
+        up_env.setdefault("queries", []).append(q)
+        return [] if "geolocation" in q else [OFFER_B]
+
+    monkeypatch.setattr(gpu_llm.vast_api, "search_offers", search)
+    rc = gpu_llm.main(["up", "--offer", "8", "--yes"])
+    assert rc == 0
+    assert gpu_llm.load_state()["dph"] == 0.45
+    assert "geolocation" in up_env["queries"][0] and "geolocation" not in up_env["queries"][1]
