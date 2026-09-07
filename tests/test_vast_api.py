@@ -61,6 +61,17 @@ def test_build_offer_query_unknown_gpu_raises():
         build_offer_query("3090", 1.0)
 
 
+def test_build_offer_query_requires_min_gpu_ram():
+    # Vast names the 40 GB and 80 GB A100 identically ("A100 SXM4"), so the
+    # name filter alone offered 40 GB cards for a100-80 (seen live 2026-09-07).
+    assert build_offer_query("a100-80", None)["gpu_ram"] == {"gte": 80000}
+    assert build_offer_query("h100-80", None)["gpu_ram"] == {"gte": 80000}
+    assert build_offer_query("h200", None)["gpu_ram"] == {"gte": 130000}
+    assert build_offer_query("5090", None)["gpu_ram"] == {"gte": 30000}
+    for v in GPU_FILTERS.values():
+        assert v["min_gpu_ram"] > 0
+
+
 def test_pick_offer_cheapest_and_empty():
     offers = [{"id": 1, "dph_total": 0.9}, {"id": 2, "dph_total": 0.5}]
     assert pick_offer(offers)["id"] == 2
