@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Vast onstart entrypoint: env -> vLLM version check -> GPU detect -> token check -> serve.
+# Vast onstart entrypoint: env -> vLLM version check -> GPU detect -> model -> token check -> serve.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/status.sh
@@ -32,7 +32,8 @@ if [[ -f "$REPO_ROOT/.env" ]]; then
     if [[ -z "${!k:-}" ]]; then export "$k=$v"; fi
   done < "$REPO_ROOT/.env"
 fi
-export HF_TOKEN="${HF_TOKEN:-}" PROFILE="${PROFILE:-}" MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
+export HF_TOKEN="${HF_TOKEN:-}" PROFILE="${PROFILE:-}" MAX_MODEL_LEN="${MAX_MODEL_LEN:-}" \
+       MODEL="${MODEL:-}" VLLM_API_KEY="${VLLM_API_KEY:-}"
 
 # 2. vLLM version (probed via importlib.metadata so we never import vllm itself)
 ver="$(bash -c "$VLLM_VERSION_CMD" 2>/dev/null | tail -n 1 | tr -d '\r' || true)"
@@ -56,13 +57,27 @@ else
   echo "[bootstrap] PROFILE override=$PROFILE"
 fi
 
-# 4. token
-profile_file="$REPO_ROOT/profiles/${PROFILE}.yaml"
-if [[ ! -f "$profile_file" ]]; then
+# 4. model (env/.env MODEL, else the single `default: true` file in profiles/<gpu>/) + token
+profile_dir="$REPO_ROOT/profiles/${PROFILE}"
+if [[ ! -d "$profile_dir" ]]; then
   write_status "FAILED: no profile '$PROFILE'"; exit 2
 fi
+if [[ -z "$MODEL" ]]; then
+  mapfile -t defaults < <(grep -lE '^default:[[:space:]]*true' "$profile_dir"/*.yaml 2>/dev/null || true)
+  if [[ ${#defaults[@]} -ne 1 ]]; then
+    write_status "FAILED: no default model for $PROFILE (found ${#defaults[@]})"; exit 2
+  fi
+  MODEL="$(basename "${defaults[0]}" .yaml)"
+  echo "[bootstrap] model=$MODEL (default for $PROFILE)"
+else
+  echo "[bootstrap] MODEL override=$MODEL"
+fi
+profile_file="$profile_dir/$MODEL.yaml"
+if [[ ! -f "$profile_file" ]]; then
+  write_status "FAILED: no model '$MODEL' for $PROFILE"; exit 2
+fi
 if grep -qE '^requires_hf_token:\s*true' "$profile_file" && [[ -z "$HF_TOKEN" ]]; then
-  write_status "FAILED: HF_TOKEN required by profile $PROFILE"; exit 3
+  write_status "FAILED: HF_TOKEN required by profile $PROFILE/$MODEL"; exit 3
 fi
 [[ -n "$HF_TOKEN" ]] && export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
 
@@ -70,4 +85,4 @@ fi
 command -v "${CURL_BIN:-curl}" >/dev/null 2>&1 || { write_status "FAILED: curl missing"; exit 5; }
 
 # 6. serve
-exec bash "$SERVE" "$PROFILE"
+exec bash "$SERVE" "$PROFILE" "$MODEL"
