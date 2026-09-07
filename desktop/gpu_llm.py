@@ -6,6 +6,8 @@ import argparse
 import csv
 import json
 import os
+import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -30,8 +32,15 @@ IMAGE = "vllm/vllm-openai:v0.27.1"
 DISK_GB = 60
 INSTANCE_WAIT_SECS = 600
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:  # `python desktop/gpu_llm.py` puts desktop/ first, not the repo
+    sys.path.insert(0, str(REPO_ROOT))
+from lib.profile import list_models  # noqa: E402
+
+PROFILES_DIR = REPO_ROOT / "profiles"
 MANAGE_KEYS_URL = "https://cloud.vast.ai/manage-keys/"
 CONSOLE_INSTANCES_URL = "https://cloud.vast.ai/instances/"
+# Model ids and API keys are single-quoted into the onstart shell text; keep them boring.
+SAFE_TOKEN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 # ---------- config / state ----------
@@ -78,6 +87,31 @@ def merge_state(fields: dict) -> None:
 
 def resolve_api_key(cfg: dict) -> str | None:
     return os.environ.get("VAST_API_KEY") or cfg.get("api_key")
+
+
+def llm_api_key_path() -> Path:
+    return home() / "llm_api_key"
+
+
+def resolve_llm_api_key(cfg: dict) -> str:
+    """The bearer token vLLM is started with and clients must send.
+    LLM_API_KEY env > config `llm_api_key` > ~/.gpu-llm/llm_api_key > generate and save."""
+    key = os.environ.get("LLM_API_KEY") or cfg.get("llm_api_key")
+    f = llm_api_key_path()
+    if not key and f.exists():
+        key = f.read_text(encoding="utf-8").strip()
+    if not key:
+        key = secrets.token_urlsafe(24)
+        try:
+            f.write_text(key + "\n", encoding="utf-8")
+            if sys.platform != "win32":
+                f.chmod(0o600)
+            print(f"Generated LLM API key -> {f}")
+        except OSError as e:
+            print(f"WARNING: could not save LLM API key to {f} ({e}); using it for this run only.")
+    if not SAFE_TOKEN.match(key):
+        raise SystemExit("llm_api_key must match [A-Za-z0-9._-]+")
+    return key
 
 
 def resolve_max_price(cfg: dict, gpu: str, cli_value: float | None) -> float:
@@ -199,9 +233,10 @@ def ssh_run(cfg: dict, remote_cmd: str, timeout: int = 20) -> str:
 
 # ---------- http ----------
 
-def http_get(url: str, timeout: float = 3.0) -> tuple[int, str]:
+def http_get(url: str, timeout: float = 3.0, headers: dict | None = None) -> tuple[int, str]:
+    req = urllib.request.Request(url, headers=headers or {})
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         e.close()
@@ -333,9 +368,30 @@ def open_tunnel_and_wait(cfg: dict, timeout: int, interval: float) -> int:
         return 1
     _spawned.append(proc)
     print("vLLM is READY.\n")
-    print(f"LLM_BASE_URL=http://127.0.0.1:{local_port}")
-    print("LLM_MODEL=qwen")
+    print_client_settings(local_port)
     return 0
+
+
+def state_context(st: dict) -> int | None:
+    """max_model_len of the model recorded in state (needs gpu + model), else None."""
+    if not (st.get("gpu") and st.get("model")):
+        return None
+    try:
+        entry = next(m for m in list_models(PROFILES_DIR, st["gpu"]) if m["id"] == st["model"])
+    except (ValueError, StopIteration):
+        return None
+    return entry.get("max_model_len")
+
+
+def print_client_settings(local_port: int) -> None:
+    """What llm-cli / Rider need: URL, the constant `local` model name, key, context."""
+    st = load_state() or {}
+    print(f"LLM_BASE_URL=http://127.0.0.1:{local_port}")
+    print("LLM_MODEL=local")
+    print(f"LLM_API_KEY={resolve_llm_api_key(load_config())}")
+    ctx = state_context(st)
+    if ctx:
+        print(f"LLM_CONTEXT={ctx}")
 
 
 def cmd_tunnel(args) -> int:
@@ -405,6 +461,50 @@ def cmd_up(args) -> int:
         return 1
 
 
+def format_model(m: dict) -> str:
+    parts = [m["id"], str(m.get("quant") or "?")]
+    if m.get("size_gb") is not None:
+        parts.append(f"{m['size_gb']} GB")
+    if m.get("max_model_len"):
+        parts.append(f"{m['max_model_len']} ctx")
+    return "  ".join(parts) + ("  (default)" if m["default"] else "")
+
+
+def print_models(models: list[dict]) -> None:
+    for i, m in enumerate(models, 1):
+        print(f"{i}. {format_model(m)}")
+
+
+def choose_model(models: list[dict], requested: str | None, yes: bool) -> dict | None:
+    """Pick a catalog entry: --model wins, then --yes / a single entry take the
+    default, else a numbered prompt (Enter = default). None means abort."""
+    default = next((m for m in models if m["default"]), models[0])
+    if requested:
+        return next((m for m in models if m["id"] == requested), None)
+    if yes or len(models) == 1:
+        return default
+    print_models(models)
+    try:
+        raw = input(f"model? [1-{len(models)}, Enter = {default['id']}] ").strip()
+    except EOFError:
+        return None
+    if raw == "":
+        return default
+    if raw.isdigit() and 1 <= int(raw) <= len(models):
+        return models[int(raw) - 1]
+    return None
+
+
+def onstart_text(model_id: str, api_key: str) -> str:
+    """vast/onstart.sh with the desktop's choices exported in front of it; bootstrap
+    reads MODEL / VLLM_API_KEY from the environment before .env."""
+    for v in (model_id, api_key):
+        if not SAFE_TOKEN.match(v):
+            raise ValueError(f"unsafe value for onstart: {v!r}")
+    base = (REPO_ROOT / "vast" / "onstart.sh").read_text(encoding="utf-8")
+    return f"export MODEL='{model_id}' VLLM_API_KEY='{api_key}'; {base}"
+
+
 def choose_offer(offers: list[dict]) -> dict | None:
     """Print a numbered offer list and return the chosen offer, or None to abort."""
     for i, o in enumerate(offers, 1):
@@ -435,6 +535,11 @@ def _cmd_up_body(args, cfg: dict, api_key: str) -> int:
             print("Already up (tunnel or instance recorded); run `down` first.")
             return 1
         clear_state()  # stale: dead pid, instance gone
+    models = list_models(PROFILES_DIR, args.gpu)
+    if args.model and args.model not in {m["id"] for m in models}:
+        print(f"Unknown model '{args.model}' for {args.gpu}. Available:")
+        print_models(models)
+        return 1
     filters = cfg.get("filters") or {}
     max_price = resolve_max_price(cfg, args.gpu, args.max_price)
     if args.offer:
@@ -470,13 +575,19 @@ def _cmd_up_body(args, cfg: dict, api_key: str) -> int:
             if offer is None:
                 print("Nothing rented.")
                 return 0
+    model = choose_model(models, args.model, args.yes)
+    if model is None:
+        print("Nothing rented.")
+        return 0
+    llm_key = resolve_llm_api_key(cfg)
+    disk = int(model.get("disk_gb") or DISK_GB)
     # Computed once, before renting, so a `dph_total`-less offer never loses
     # the instance id to a KeyError after a successful (billing) rent.
     dph = offer.get("dph_total", 0.0)
-    onstart = (REPO_ROOT / "vast" / "onstart.sh").read_text(encoding="utf-8")
-    iid = vast_api.rent_offer(api_key, offer["id"], IMAGE, DISK_GB, onstart)
-    save_state({"pid": 0, "instance_id": iid, "gpu": args.gpu, "dph": dph})
-    print(f"Rented instance {iid} at ${dph:.3f}/hr. Waiting for SSH info...")
+    onstart = onstart_text(model["id"], llm_key)
+    iid = vast_api.rent_offer(api_key, offer["id"], IMAGE, disk, onstart)
+    save_state({"pid": 0, "instance_id": iid, "gpu": args.gpu, "model": model["id"], "dph": dph})
+    print(f"Rented instance {iid} ({model['id']}, {disk} GB disk) at ${dph:.3f}/hr. Waiting for SSH info...")
     inst, status = wait_instance_running(api_key, iid, INSTANCE_WAIT_SECS)
     if status != "running":
         print(f"Instance {iid} did not reach running ({status}); it is still rented.")
@@ -516,15 +627,22 @@ def cmd_status(args) -> int:
         print("tunnel: down")
         return 1
     print(f"tunnel: up (pid {st['pid']}) 127.0.0.1:{st.get('local_port')} -> {st.get('host')}:{REMOTE_PORT}")
-    code, body = http_get(f"http://127.0.0.1:{st['local_port']}/v1/models", timeout=3.0)
+    key = resolve_llm_api_key(load_config())
+    code, body = http_get(f"http://127.0.0.1:{st['local_port']}/v1/models", timeout=3.0,
+                          headers={"Authorization": f"Bearer {key}"})
     if code == 200:
         try:
             ids = [m["id"] for m in json.loads(body).get("data", [])]
         except (ValueError, KeyError, TypeError):
             ids = []
         print(f"models: {', '.join(ids) or '(none)'}")
+    elif code == 401:
+        print("models: unauthorized (check LLM_API_KEY)")
     else:
         print("models: unreachable")
+    if st.get("model"):
+        ctx = state_context(st)
+        print(f"model: {st['model']}" + (f" (context {ctx})" if ctx else ""))
     gpu = ssh_run(state_cfg(st), "nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader")
     print(f"gpu: {gpu}")
     return 0
@@ -561,6 +679,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     u = sub.add_parser("up", help="rent a Vast GPU, wait for READY, open the tunnel")
     u.add_argument("--gpu", choices=sorted(vast_api.GPU_FILTERS), default="5090")
+    u.add_argument("--model", default=None,
+                   help="model id under profiles/<gpu>/ (default: that GPU's default; see profiles/README.md)")
     u.add_argument("--max-price", type=float, default=None, help="max $/hr (default per GPU)")
     u.add_argument("--yes", action="store_true", help="skip the prompt and rent the cheapest offer")
     u.add_argument("--list", type=int, default=5, help="how many offers to choose from (default 5)")

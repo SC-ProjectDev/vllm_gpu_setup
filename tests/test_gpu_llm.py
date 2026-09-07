@@ -102,7 +102,7 @@ def _health_server(ok_after: int):
             if self.path == "/health" and hits["n"] > ok_after:
                 self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
             elif self.path == "/v1/models":
-                body = b'{"data":[{"id":"qwen"}]}'
+                body = b'{"data":[{"id":"local"},{"id":"qwen3.8-27b-nvfp4"}]}'
                 self.send_response(200); self.send_header("Content-Length", str(len(body)))
                 self.end_headers(); self.wfile.write(body)
             else:
@@ -223,7 +223,8 @@ def test_cmd_tunnel_spawns_ssh_saves_state_and_prints_env(home, monkeypatch, cap
     assert st["host"] == "1.2.3.4" and st["ssh_port"] == 2222 and st["local_port"] == srv.server_port
     assert gpu_llm.pid_alive(st["pid"])
     assert f"LLM_BASE_URL=http://127.0.0.1:{srv.server_port}" in out
-    assert "LLM_MODEL=qwen" in out
+    assert "LLM_MODEL=local" in out
+    assert "LLM_API_KEY=" in out
     gpu_llm.main(["down"])
 
 
@@ -308,7 +309,7 @@ def test_status_reports_tunnel_models_and_gpu(home, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert f"tunnel: up (pid {p.pid})" in out
-    assert "models: qwen" in out
+    assert "models: local, qwen3.8-27b-nvfp4" in out
     assert "gpu: NVIDIA GeForce RTX 5090" in out
 
 
@@ -710,3 +711,136 @@ def test_down_with_instance_but_no_api_key_warns(home, monkeypatch, capsys):
     assert rc == 1
     assert "4242" in out and "key" in out.lower()
     assert gpu_llm.load_state()["instance_id"] == 4242
+
+
+# ---------- M3: model catalog, LLM api key, onstart exports ----------
+
+from lib.profile import list_models
+
+
+def test_resolve_llm_api_key_order_env_config_file(home, monkeypatch):
+    (home / "llm_api_key").write_text("from-file" + chr(10))
+    assert gpu_llm.resolve_llm_api_key({}) == "from-file"
+    assert gpu_llm.resolve_llm_api_key({"llm_api_key": "from-cfg"}) == "from-cfg"
+    monkeypatch.setenv("LLM_API_KEY", "from-env")
+    assert gpu_llm.resolve_llm_api_key({"llm_api_key": "from-cfg"}) == "from-env"
+
+
+def test_resolve_llm_api_key_generates_and_persists(home, capsys):
+    k1 = gpu_llm.resolve_llm_api_key({})
+    k2 = gpu_llm.resolve_llm_api_key({})
+    assert k1 == k2 and len(k1) >= 24
+    assert (home / "llm_api_key").read_text().strip() == k1
+    assert "Generated LLM API key" in capsys.readouterr().out
+
+
+def test_resolve_llm_api_key_rejects_unsafe():
+    with pytest.raises(SystemExit):
+        gpu_llm.resolve_llm_api_key({"llm_api_key": "bad key'; rm -rf /"})
+
+
+def test_onstart_text_prepends_exports_and_keeps_script():
+    text = gpu_llm.onstart_text("gpt-oss-120b", "abc-123")
+    assert text.startswith("export MODEL='gpt-oss-120b' VLLM_API_KEY='abc-123'; cd /root && git clone")
+    with pytest.raises(ValueError):
+        gpu_llm.onstart_text("x y", "k")
+
+
+def test_up_yes_uses_default_model_disk_and_exports(up_env, capsys):
+    up_env["offers"] = [OFFER]
+    up_env["instances"] = [RUNNING]
+    rc = gpu_llm.main(["up", "--yes"])
+    assert rc == 0
+    _, _, disk, onstart = up_env["rented"][0]
+    assert disk == 60
+    key = gpu_llm.resolve_llm_api_key({})
+    assert onstart.startswith(f"export MODEL='qwen3.8-27b-nvfp4' VLLM_API_KEY='{key}'; ")
+    assert gpu_llm.load_state()["model"] == "qwen3.8-27b-nvfp4"
+
+
+def test_up_model_flag_sets_disk_from_profile(up_env, capsys):
+    up_env["offers"] = [OFFER]
+    up_env["instances"] = [RUNNING]
+    rc = gpu_llm.main(["up", "--gpu", "a100-80", "--model", "gpt-oss-120b", "--yes"])
+    assert rc == 0
+    assert up_env["rented"][0][2] == 100
+    assert "MODEL='gpt-oss-120b'" in up_env["rented"][0][3]
+    assert "gpt-oss-120b" in capsys.readouterr().out          # rent line names the model
+
+
+def test_up_unknown_model_lists_and_exits_1_before_search(up_env, capsys):
+    rc = gpu_llm.main(["up", "--gpu", "a100-80", "--model", "nope", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert up_env["rented"] == [] and "queries" not in up_env
+    assert "qwen3.8-27b-bf16" in out and "gpt-oss-120b" in out
+
+
+def test_up_model_picker_enter_takes_default(up_env, monkeypatch, capsys):
+    up_env["offers"] = [OFFER]
+    up_env["instances"] = [RUNNING]
+    answers = iter(["1", ""])                      # offer #1, then Enter for the model
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    rc = gpu_llm.main(["up", "--gpu", "a100-80"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "(default)" in out and "MXFP4" in out and "63 GB" in out
+    assert gpu_llm.load_state()["model"] == "qwen3.8-27b-bf16"
+
+
+def test_up_model_picker_number_picks(up_env, monkeypatch):
+    up_env["offers"] = [OFFER]
+    up_env["instances"] = [RUNNING]
+    answers = iter(["1", "2"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    rc = gpu_llm.main(["up", "--gpu", "a100-80"])
+    assert rc == 0
+    expected = list_models(gpu_llm.REPO_ROOT / "profiles", "a100-80")[1]["id"]
+    assert gpu_llm.load_state()["model"] == expected
+
+
+def test_up_model_picker_bad_choice_rents_nothing(up_env, monkeypatch, capsys):
+    up_env["offers"] = [OFFER]
+    answers = iter(["1", "9"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    rc = gpu_llm.main(["up", "--gpu", "a100-80"])
+    assert rc == 0 and up_env["rented"] == []
+    assert "Nothing rented" in capsys.readouterr().out
+
+
+def test_up_single_model_gpu_skips_picker(up_env, monkeypatch):
+    up_env["offers"] = [OFFER]
+    up_env["instances"] = [RUNNING]
+    answers = iter(["1"])                          # only the offer prompt
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    assert gpu_llm.main(["up"]) == 0
+
+
+def test_print_client_settings_shows_key_and_context(home, capsys):
+    (home / "llm_api_key").write_text("k-1" + chr(10))
+    gpu_llm.save_state({"pid": 0, "gpu": "5090", "model": "qwen3.8-27b-nvfp4"})
+    gpu_llm.print_client_settings(8000)
+    out = capsys.readouterr().out
+    assert "LLM_BASE_URL=http://127.0.0.1:8000" in out
+    assert "LLM_MODEL=local" in out
+    assert "LLM_API_KEY=k-1" in out
+    assert "LLM_CONTEXT=32768" in out
+
+
+def test_status_sends_bearer_and_reports_401(home, monkeypatch, capsys):
+    (home / "llm_api_key").write_text("k-1" + chr(10))
+    monkeypatch.setenv("GPU_LLM_SSH", _fake_ssh(home, "gpu-line"))
+    seen = {}
+
+    def fake_get(url, timeout=3.0, headers=None):
+        seen["headers"] = headers
+        return 401, ""
+
+    monkeypatch.setattr(gpu_llm, "http_get", fake_get)
+    gpu_llm.save_state({"pid": os.getpid(), "host": "h", "ssh_port": 22, "local_port": 8000,
+                       "image": "python", "gpu": "5090", "model": "qwen3.8-27b-nvfp4"})
+    gpu_llm.main(["status"])
+    out = capsys.readouterr().out
+    assert seen["headers"] == {"Authorization": "Bearer k-1"}
+    assert "models: unauthorized (check LLM_API_KEY)" in out
+    assert "model: qwen3.8-27b-nvfp4 (context 32768)" in out
