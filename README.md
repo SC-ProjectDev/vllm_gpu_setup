@@ -1,8 +1,12 @@
 # vllm_gpu_setup
 
-Disposable bootstrap for a rented Vast.ai GPU that serves **Qwen3.8-27B** via
-vLLM's OpenAI-compatible API, tunnelled to your desktop at
-`http://127.0.0.1:8000`. Design: `docs/superpowers/specs/2026-08-22-vllm-gpu-setup-design.md`.
+Disposable bootstrap for a rented Vast.ai GPU that serves a model you pick
+from `profiles/` (default **Qwen3.8-27B**; also gpt-oss-120b and an
+abliterated FP8 Qwen on 80 GB cards — see `profiles/README.md`) via vLLM's
+OpenAI-compatible API, tunnelled to your desktop at `http://127.0.0.1:8000`.
+Whatever the model, it is served under the constant name **`local`** behind a
+bearer API key, so llm-cli and Rider configs never change.
+Designs: `docs/superpowers/specs/` (M1 2026-08-22, M2 2026-08-23, M3 2026-09-07).
 
 ## Desktop prerequisites
 
@@ -19,6 +23,8 @@ api_key = "..."          # Vast API key, from https://cloud.vast.ai/manage-keys/
                           # (or set the VAST_API_KEY env var instead)
 local_port = 8000
 # ssh_key = "C:/Users/you/.ssh/id_ed25519"   # optional
+# llm_api_key = "..."     # optional bearer token for vLLM; if unset, `up` generates
+                          # one into %USERPROFILE%\.gpu-llm\llm_api_key (LLM_API_KEY env overrides)
 
 # Optional stricter offer filters (defaults: inet_down 500, reliability 0.98,
 # any country):
@@ -34,9 +40,13 @@ local_port = 8000
 
 ```toml
 base_url = "http://127.0.0.1:8000"
-model = "qwen"
-coder_model = "qwen"
+model = "local"
+coder_model = "local"
 ```
+
+plus llm-cli's API key set to the `LLM_API_KEY` value that `up` prints
+(the same string lives in `%USERPROFILE%\.gpu-llm\llm_api_key`). vLLM
+rejects `/v1/*` requests without it.
 
 ## Daily loop
 
@@ -45,8 +55,16 @@ coder_model = "qwen"
    Mbps, reliability, country, and offer id; pick one by number (Enter
    aborts). `--yes` auto-rents the cheapest, `--list N` changes the count,
    and `--offer <id>` rents a specific offer id straight from the console.
+   If the GPU has more than one model in `profiles/<gpu>/`, a second
+   numbered picker follows (quant, size, context; Enter = default), or pass
+   `--model <id>` (e.g. `--gpu a100-80 --model gpt-oss-120b`). `--yes`
+   takes the default model. Disk is sized from the profile's `disk_gb`.
    It then rents, waits for the instance to come up, opens the tunnel, and
-   prints `vLLM is READY.` (5–10 min cold).
+   prints `vLLM is READY.` (5–10 min cold; longer for the 60–100 GB models)
+   followed by `LLM_BASE_URL`, `LLM_MODEL=local`, `LLM_API_KEY`, and
+   `LLM_CONTEXT` — everything a client needs.
+   **Push before `up`**: the instance clones `main`, so your local
+   `profiles/` and the instance's must agree.
 2. Use `llm-cli chat`, `llm-cli code`, `llm-cli agent` as usual.
 3. `python desktop/gpu_llm.py status` / `logs -f` when curious.
 4. `python desktop/gpu_llm.py down` — closes the tunnel **and destroys the
@@ -57,7 +75,9 @@ coder_model = "qwen"
 ### Fallback: manual rental
 
 If you'd rather rent by hand (or don't have a Vast API key configured), rent
-an instance using `vast/template.md`, copy host/port into `config.toml`, and
+an instance using `vast/template.md` (set `-e MODEL=` to the model id you
+want and `-e VLLM_API_KEY=` to the contents of `llm_api_key` so the desktop's
+key matches), copy host/port into `config.toml`, and
 run `python desktop/gpu_llm.py tunnel` instead of `up`. In this mode `down`
 only closes the tunnel — it does not know about a manually-rented instance,
 so you still need to **destroy the instance in the Vast console** yourself.
@@ -66,16 +86,18 @@ so you still need to **destroy the instance in the Vast console** yourself.
 
 | Script | Purpose |
 |---|---|
-| `bootstrap.sh` | onstart entrypoint: version check → GPU detect → profile → serve |
-| `lib/detect_gpu.sh` | `nvidia-smi` → profile id |
-| `lib/profile.py` | profile YAML → `vllm serve` argv |
-| `scripts/serve.sh <profile>` | launch vLLM, manage `/var/log/vllm.status` |
-| `scripts/health.sh` | `/health` + `/v1/models` |
-| `scripts/smoke.sh` | one thinking-mode completion; prints tok/s |
+| `bootstrap.sh` | onstart entrypoint: version check → GPU detect → model (`MODEL` or the GPU's default) → serve |
+| `lib/detect_gpu.sh` | `nvidia-smi` → GPU id (= `profiles/<gpu>/`) |
+| `lib/profile.py` | profile YAML → `vllm serve` argv; `list_models`/`default_model` catalog |
+| `profiles/<gpu>/<model>.yaml` | one complete vLLM config per GPU × model; `profiles/README.md` has the matrix |
+| `scripts/serve.sh <gpu> <model>` | optional `hf buckets sync`, launch vLLM with `--api-key`, manage `/var/log/vllm.status` |
+| `scripts/health.sh` | `/health` + `/v1/models` (bearer `VLLM_API_KEY`) |
+| `scripts/smoke.sh` | one thinking-mode completion against `local`; prints tok/s |
 
 Status file values: `STARTING`, `READY`, `FAILED: <reason>`.
-Bootstrap exit codes: 2 unknown GPU, 3 `HF_TOKEN` required, 4 vLLM < 0.17 or
-not importable, 5 `curl` missing.
+Bootstrap exit codes: 2 unknown GPU / model / no default, 3 `HF_TOKEN`
+required, 4 vLLM < 0.17 or not importable, 5 `curl` missing, 6 bucket
+download failed.
 
 ## Monitoring a running instance
 
@@ -116,7 +138,7 @@ python -m pytest
 
 Requires `bash` on PATH (Git Bash on Windows).
 
-## Milestone 1 acceptance run (RTX 5090)
+## Milestone 1 acceptance run (RTX 5090) — PASSED 2026-08-23 (pre-catalog: model was served as `qwen`)
 
 Budget ~1 hour of rental. Record the values in the table at the end.
 
@@ -157,8 +179,81 @@ Budget ~1 hour of rental. Record the values in the table at the end.
       coding, 29.5 GB VRAM, 17% GPU util / 139 W. Cost: $0.396/hr (billed
       total in the Vast console).
 
-## Deferred (milestone 3)
+## Using the model from JetBrains Rider
+
+Rider's AI Assistant accepts OpenAI-compatible endpoints, which is exactly
+what vLLM exposes through the tunnel. With `up` (or `tunnel`) showing READY:
+
+1. **Settings | Tools | AI Assistant | Providers & API keys** → *Third-party
+   AI providers* → **OpenAI Compatible**.
+   - URL: `http://127.0.0.1:8000/v1` (if *Test Connection* fails, try
+     `http://127.0.0.1:8000` — the docs don't say which form it wants).
+   - API key: the `LLM_API_KEY` value from the banner. The field is
+     mandatory in Rider and vLLM enforces it on `/v1/*`.
+   - *Tool calling*: on (every profile passes vLLM's tool-call parser).
+   - *Test Connection*, then *Apply*.
+2. **Models Assignment**: set *Core features* to `local`. Set the model
+   **context window to `LLM_CONTEXT`** from the banner — Rider's default
+   is 64K, which is larger than the 5090 profile's 32K and will error.
+   *Instant helpers* can also be `local`.
+3. Skip the **AI Completion** section (inline completion). A 27B thinking
+   model is slow and poorly suited to fill-in-the-middle; leave it on the
+   JetBrains default or off.
+4. Reasoning comes back as `reasoning_content`, which Rider ignores; only
+   the final answer shows. Thinking still costs tokens and latency.
+
+Known unknowns for the acceptance run: the exact URL form, and whether
+AI Assistant's agent mode (MCP tools) works with a custom provider — the
+docs say MCP tools are unsupported "with local models".
+
+**Junie**: the IDE plugin has no custom-model setting. The Junie CLI does,
+via a JSON profile (`$JUNIE_HOME/models/local.json` or `.junie/models/`):
+
+```json
+{
+  "id": "local",
+  "displayName": "Vast vLLM (local)",
+  "apiType": "OpenAICompletion",
+  "baseUrl": "http://127.0.0.1:8000/v1/chat/completions",
+  "apiKey": "${LLM_API_KEY}",
+  "maxContextLength": 32768
+}
+```
+
+## Milestone 3 acceptance run
+
+Budget ~1 h on a 5090, ~1.5 h on an A100 80GB. Push `main` first.
+
+- [ ] 5090, default model: `up` → READY; banner shows `LLM_API_KEY` and
+      `LLM_CONTEXT=32768`; `llm-cli models` lists `local` and
+      `qwen3.8-27b-nvfp4`; `curl http://127.0.0.1:8000/v1/models` without a
+      bearer returns 401, with it returns 200.
+- [ ] `status` prints `model: qwen3.8-27b-nvfp4 (context 32768)`.
+- [ ] A100 80GB: `up --gpu a100-80 --model gpt-oss-120b` → READY within the
+      timeout (63 GB download); SSH in, `VLLM_API_KEY=<key> bash scripts/smoke.sh`
+      prints `reasoning: ok`; record tok/s and peak VRAM; try
+      `MAX_MODEL_LEN=131072` and note whether it stays READY.
+- [ ] A100 80GB: `up --gpu a100-80 --model qwen3.8-27b-modded-fp8` → log
+      shows `[serve] syncing hf://buckets/...`, READY; record sync time and
+      whether the bucket needed an `HF_TOKEN`.
+- [ ] Rider: *Test Connection* succeeds (record which URL form); chat with
+      `local` streams; tool-calling toggle behaviour recorded; agent mode
+      result recorded.
+- [ ] `down` destroys each instance; console shows none running.
+
+| Metric | Value |
+|---|---|
+| 5090 time to READY (regression) | |
+| gpt-oss-120b on A100: time to READY / tok/s / peak VRAM | |
+| gpt-oss-120b max stable `max_model_len` on A100 | |
+| modded-fp8 bucket sync time / token needed? | |
+| Rider URL form that passed Test Connection | |
+| Rider agent mode with `local` | |
+
+## Deferred (milestone 4)
 
 FastAPI control plane, 3090/4090 profiles (need patched vLLM), persistent
 weight volumes, `gpu-llm stats` subcommand (sample `/metrics` twice and
-print live tok/s + queue depth + KV-cache/VRAM in one shot).
+print live tok/s + queue depth + KV-cache/VRAM in one shot),
+Qwen3.8-Flash-Next (needs multi-GPU or a newer image — see
+`profiles/README.md`), MTP speculative decoding for the Qwen 27B profiles.
