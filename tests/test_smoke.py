@@ -7,6 +7,7 @@ import pytest
 from tests.conftest import ROOT, run_bash
 
 SMOKE = ROOT / "scripts" / "smoke.sh"
+HEALTH = ROOT / "scripts" / "health.sh"
 
 
 def _stop(srv):
@@ -14,17 +15,30 @@ def _stop(srv):
     srv.server_close()
 
 
-def serve_json(payload: dict):
+def serve_json(payload: dict, seen: dict | None = None):
+    """Fake vLLM: POST -> `payload`; GET /v1/models -> a model list; GET anything -> ok.
+    When `seen` is given, records the POST's Authorization header and JSON body and
+    every GET as (path, Authorization)."""
     class H(BaseHTTPRequestHandler):
-        def do_POST(self):
-            n = int(self.headers.get("Content-Length", 0))
-            self.rfile.read(n)
-            body = json.dumps(payload).encode()
+        def _reply(self, body: bytes):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(n)
+            if seen is not None:
+                seen["auth"] = self.headers.get("Authorization")
+                seen["body"] = json.loads(raw)
+            self._reply(json.dumps(payload).encode())
+
+        def do_GET(self):
+            if seen is not None:
+                seen.setdefault("gets", []).append((self.path, self.headers.get("Authorization")))
+            self._reply(b'{"data":[{"id":"local"}]}' if self.path == "/v1/models" else b"ok")
 
         def log_message(self, *a):
             pass
@@ -71,3 +85,37 @@ def test_smoke_handles_zero_elapsed():
         _stop(srv)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "tok/s: n/a" in r.stdout
+
+
+def test_smoke_sends_bearer_and_uses_local_model():
+    seen = {}
+    srv, base = serve_json(completion("thinking...", "4"), seen)
+    try:
+        r = run_bash(SMOKE, env={"BASE_URL": base, "VLLM_API_KEY": "sekrit"})
+    finally:
+        _stop(srv)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert seen["auth"] == "Bearer sekrit"
+    assert seen["body"]["model"] == "local"
+
+
+def test_smoke_without_key_sends_no_auth_header():
+    seen = {}
+    srv, base = serve_json(completion("thinking...", "4"), seen)
+    try:
+        run_bash(SMOKE, env={"BASE_URL": base, "VLLM_API_KEY": ""})
+    finally:
+        _stop(srv)
+    assert seen["auth"] is None
+
+
+def test_health_sends_bearer_only_to_v1():
+    seen = {}
+    srv, base = serve_json({}, seen)
+    try:
+        r = run_bash(HEALTH, env={"BASE_URL": base, "VLLM_API_KEY": "sekrit"})
+    finally:
+        _stop(srv)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert ("/health", None) in seen["gets"]
+    assert ("/v1/models", "Bearer sekrit") in seen["gets"]

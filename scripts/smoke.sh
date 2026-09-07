@@ -2,7 +2,9 @@
 # One thinking-mode chat completion. Asserts reasoning + content, prints tok/s.
 set -euo pipefail
 BASE="${BASE_URL:-http://127.0.0.1:8000}"
-MODEL="${MODEL:-qwen}"
+MODEL="${MODEL:-local}"
+auth=()
+if [[ -n "${VLLM_API_KEY:-}" ]]; then auth=(-H "Authorization: Bearer $VLLM_API_KEY"); fi
 
 payload=$(cat <<JSON
 {"model":"$MODEL","stream":false,"temperature":1.0,"top_p":0.95,"max_tokens":512,
@@ -12,7 +14,7 @@ JSON
 )
 
 start="${SMOKE_START:-$(date +%s.%N)}"
-resp="$(curl -fsS -m 600 "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d "$payload")"
+resp="$(curl -fsS -m 600 ${auth[@]+"${auth[@]}"} "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d "$payload")"
 end="${SMOKE_END:-$(date +%s.%N)}"
 
 RESP="$resp" START="$start" END="$end" python3 - <<'PY'
